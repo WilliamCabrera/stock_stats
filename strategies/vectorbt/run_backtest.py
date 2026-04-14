@@ -9,8 +9,6 @@ from pathlib import Path
 from app.utils.market_utils import append_single_parquet
 import strategies.vectorbt.small_caps  as sc 
 
-#backside_short_lower_low, save_trades_to_file, sc.short_push_exhaustion, gap_crap_strategy
-
 
 def run_backtest(path="backtest_dataset", sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=True):
 
@@ -76,7 +74,7 @@ def run_backtest(path="backtest_dataset", sample_type="in_sample", strategy_fn=s
         # -----------------------------
         if index == 0 and counter > 0 and counter <= 100_000:
             trades = strategy_fn(df_dict)
-            save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_{sample_type}_trades.parquet', append=append_trades)
+            sc.save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_{sample_type}_trades.parquet', append=append_trades)
             total_trades += len(trades)
             print(f'Trades generated in iteration {index}: {len(trades)}')
 
@@ -91,64 +89,130 @@ def run_backtest(path="backtest_dataset", sample_type="in_sample", strategy_fn=s
         print(f'Finalizing with {index} iterations')
 
 
-if __name__ == "__main__":
+def run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=sc.backside_short_lower_low, append_trades=True):
+    """Run backtest on the full dataset (out-of-sample) for a given timeframe."""
+
+    tickers_dir = Path(f'backtest_dataset/full/{timeframe}/tickers')
+
+    if not tickers_dir.exists():
+        print(f"Tickers folder {tickers_dir} does not exist.")
+        return
+
+    ticker_files = sorted(tickers_dir.glob('*.parquet'))
+
+    if not ticker_files:
+        print("No ticker files found.")
+        return
+
+    folder_path = Path(f'backtest_dataset/full/{timeframe}/trades/{strategy_fn.__name__}')
+    folder_path.mkdir(parents=True, exist_ok=True)
+
+    print(f'Total tickers to process: {len(ticker_files)}')
+
+    counter = 0
+    df_dict = {}
+    index = 0
+    total_trades = 0
+
+    start_time = tm.perf_counter()
+
+    # -----------------------------
+    # MAIN LOOP
+    # -----------------------------
+    for ticker_file in ticker_files:
+        ticker = ticker_file.stem
+
+        df = pd.read_parquet(ticker_file)
+        df['date'] = pd.to_datetime(df['date'])
+
+        ticker_data = df.set_index('date')
+        len_ticker = len(ticker_data)
+
+        if len_ticker <= 50:
+            continue
+
+        if counter >= 100_000:
+            index += 1
+            print(
+                f'Processing backtest for {len(df_dict)} tickers '
+                f'at iteration {index}...'
+            )
+
+            trades = strategy_fn(df_dict)
+            sc.save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_full_{timeframe}_trades.parquet', append=append_trades)
+            total_trades += len(trades)
+            print(f'Trades generated in iteration {index}: {len(trades)}')
+
+            counter = 0
+            df_dict = {}
+
+        counter += len_ticker
+        df_dict[ticker] = ticker_data
+
+    # -----------------------------
+    # FINAL FLUSH
+    # -----------------------------
+    if counter > 0:
+        index += 1
+        print(
+            f'Processing backtest for {len(df_dict)} tickers '
+            f'at iteration {index}...'
+        )
+        trades = strategy_fn(df_dict)
+        sc.save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_full_{timeframe}_trades.parquet', append=append_trades)
+        total_trades += len(trades)
+        print(f'Trades generated in iteration {index}: {len(trades)}')
+
+    end_time = tm.perf_counter()
+
+    print(
+        f"⏰ Tiempo total full/{timeframe} ({strategy_fn.__name__}): "
+        f"{end_time - start_time:.2f}s | "
+        f"Total trades: {total_trades}"
+    )
+
+    print(f'Finalizing with {index} iterations')
+
+
+def run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=True):
+    """Run full dataset backtest for both 5m and 15m timeframes."""
+    run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest_full_out_of_sample_dataset(timeframe="15m", strategy_fn=strategy_fn, append_trades=append_trades)
+
+
+def run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=True):
 
     # 5m folds
     path1_5m = "backtest_dataset/walkforward/5m/fold_1"
     path2_5m = "backtest_dataset/walkforward/5m/fold_2"
     path3_5m = "backtest_dataset/walkforward/5m/fold_3"
 
-    # run_backtest(path=path1_5m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    # run_backtest(path=path2_5m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    # run_backtest(path=path3_5m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-
-    # run_backtest(path=path1_5m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    # run_backtest(path=path2_5m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    # run_backtest(path=path3_5m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-
-    run_backtest(path=path1_5m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path2_5m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path3_5m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-
-    run_backtest(path=path1_5m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path2_5m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path3_5m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-
-
-    run_backtest(path=path1_5m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path2_5m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path3_5m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-
-    run_backtest(path=path1_5m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path2_5m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path3_5m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-
+    run_backtest(path=path1_5m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest(path=path2_5m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest(path=path3_5m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
 
     # 15m folds
     path1_15m = "backtest_dataset/walkforward/15m/fold_1"
     path2_15m = "backtest_dataset/walkforward/15m/fold_2"
     path3_15m = "backtest_dataset/walkforward/15m/fold_3"
 
-    run_backtest(path=path1_15m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
+    run_backtest(path=path1_15m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest(path=path2_15m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest(path=path3_15m, sample_type=sample_type, strategy_fn=strategy_fn, append_trades=append_trades)
+    
 
-    run_backtest(path=path1_15m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
+if __name__ == "__main__":
+    
+ 
+    #pass
 
-    run_backtest(path=path1_15m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-
-    run_backtest(path=path1_15m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-
-    run_backtest(path=path1_15m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-
-    run_backtest(path=path1_15m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path2_15m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    run_backtest(path=path3_15m, sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
+    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)       
+    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
+    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)       
+    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    
+    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=False)
+    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=False)
+    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=False)

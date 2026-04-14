@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.abspath("."))
 
 from app.utils.indicators import compute_atr, compute_donchian, compute_rvol, compute_sma, compute_vwap
 from app.utils.massive import fetch_candles
-from app.utils.pipeline_v1 import fetch_stock_data_filtered
+from app.utils.pipeline_data_collection import fetch_stock_data_filtered
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

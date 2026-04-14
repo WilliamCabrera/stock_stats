@@ -869,10 +869,6 @@ if __name__ == "__main__":
     setup_logging()
     run_incremental_v1()
     
-    #trades_path = "backtest_dataset/in_sample/trades/backside_short/backside_short_in_sample_trades.parquet"
-    # data_path = 'backtest_dataset/in_sample/gappers_backtest_dataset_5min_in_sample.parquet'
-
-    #trades =  pd.read_parquet(trades_path)
-    #analysis_and_plot(trades=trades, initial_capital=10000, risk_pct=0.01)
+    
     
     

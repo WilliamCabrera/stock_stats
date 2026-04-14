@@ -1236,17 +1236,19 @@ def short_push_exhaustion(f_dict):
         )
 
         # ==================================================
-        # SEÑAL 2: VOLUMEN 1.3x MAYOR QUE PROMEDIO 4 BARRAS PREVIAS
+        # SEÑAL 2: VOLUMEN MAYOR QUE CADA UNA DE LAS 4 VELAS PREVIAS
         # ==================================================
         prev_vol_1 = np.where(same_day_1[:, None], np.roll(volume_arr, 1, axis=0), np.nan)
         prev_vol_2 = np.where(same_day_2[:, None], np.roll(volume_arr, 2, axis=0), np.nan)
         prev_vol_3 = np.where(same_day_3[:, None], np.roll(volume_arr, 3, axis=0), np.nan)
         prev_vol_4 = np.where(same_day_4[:, None], np.roll(volume_arr, 4, axis=0), np.nan)
 
-        vol_stack   = np.stack([prev_vol_1, prev_vol_2, prev_vol_3, prev_vol_4], axis=0)
-        with np.errstate(all="ignore"):
-            vol_avg_4 = np.nanmean(vol_stack, axis=0)             # NaN where no prior same-day bars
-        volume_cond = volume_arr >= 1.3 * vol_avg_4
+        volume_cond = (
+            (volume_arr > prev_vol_1) &
+            (volume_arr > prev_vol_2) &
+            (volume_arr > prev_vol_3) &
+            (volume_arr > prev_vol_4)
+        )
 
         # ==================================================
         # GAP % VS PREVIOUS DAY CLOSE  (usa open — sin look-ahead)

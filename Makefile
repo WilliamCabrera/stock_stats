@@ -79,25 +79,9 @@ test:
 test-file:
 	$(COMPOSE) exec api python -m pytest $(FILE) -v
 
-## Run the full pipeline for ALL tickers and inject into the database.
-## Tune with:  make pipeline PROCS=8 CONCUR=100
-pipeline:
-	$(COMPOSE) run --rm api python -m scripts.pipeline run \
-	  --procs $(PROCS) --concur $(CONCUR) \
-	  2>&1 | grep -v 'HTTP Request'
 
-
-
-## Run the pipeline on a random sample of N tickers.
-## Tune with:  make pipeline-sample N=50 PROCS=8 CONCUR=100
-N ?= 50
-pipeline-sample:
-	$(COMPOSE) run --rm api python -m scripts.pipeline sample \
-	  --n $(N) --procs $(PROCS) --concur $(CONCUR) \
-	  2>&1 | grep -v 'HTTP Request'
-
-pipeline-v1:
-	docker exec -it backtester_api-api-1 python3 app/utils/pipeline_v1.py
+pipeline-data-collection:
+	docker exec -it backtester_api-api-1 python3 app/utils/pipeline_data_collection.py
 
 pipeline-delisted:
 	docker exec -it backtester_api-api-1 python3 app/utils/pipeline_delisted.py

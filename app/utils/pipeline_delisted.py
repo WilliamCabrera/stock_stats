@@ -24,7 +24,7 @@ from app.utils.market_utils import (
     _save_state,
     fetch_live_tickers,
 )
-from app.utils.pipeline_v1 import (
+from app.utils.pipeline_data_collection import (
     fetch_data_1_min,
     fetch_and_process,
     _fetch_split,
@@ -234,7 +234,7 @@ def run_delisted_pipeline(
     1. Call compare_tickers() to get the live-vs-local status for all tickers.
     2. Filter to status == "delisted" — these are tickers no longer active on Massive.
     3. Build monthly fetch chunks from ``history_start`` to each ticker's delisting_date.
-    4. Run the same multiprocess pipeline as pipeline_v1.
+    4. Run the same multiprocess pipeline as pipeline_data_collection.
 
     Args:
         history_start:  Fixed start date for all tickers (default 2020-01-01).

@@ -107,6 +107,11 @@ def run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=sc.backs
     folder_path = Path(f'backtest_dataset/full/{timeframe}/trades/{strategy_fn.__name__}')
     folder_path.mkdir(parents=True, exist_ok=True)
 
+    # Always start with a clean output file so batches don't overwrite each other
+    output_file = Path(f'{folder_path}/{strategy_fn.__name__}_full_{timeframe}_trades.parquet')
+    if not append_trades and output_file.exists():
+        output_file.unlink()
+
     print(f'Total tickers to process: {len(ticker_files)}')
 
     counter = 0
@@ -139,7 +144,7 @@ def run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=sc.backs
             )
 
             trades = strategy_fn(df_dict)
-            sc.save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_full_{timeframe}_trades.parquet', append=append_trades)
+            sc.save_trades_to_file(trades, file_path=str(output_file), append=True)
             total_trades += len(trades)
             print(f'Trades generated in iteration {index}: {len(trades)}')
 
@@ -159,7 +164,7 @@ def run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=sc.backs
             f'at iteration {index}...'
         )
         trades = strategy_fn(df_dict)
-        sc.save_trades_to_file(trades, file_path=f'{folder_path}/{strategy_fn.__name__}_full_{timeframe}_trades.parquet', append=append_trades)
+        sc.save_trades_to_file(trades, file_path=str(output_file), append=True)
         total_trades += len(trades)
         print(f'Trades generated in iteration {index}: {len(trades)}')
 

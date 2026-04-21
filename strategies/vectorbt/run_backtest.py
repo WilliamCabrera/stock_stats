@@ -179,6 +179,101 @@ def run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=sc.backs
     print(f'Finalizing with {index} iterations')
 
 
+def run_backtest_incremental(timeframe="5m", strategy_fn=sc.backside_short_lower_low, append_trades=True):
+    """
+    Run backtest on the pending candles for a given timeframe and append the
+    resulting trades to the same full-dataset trades file.
+
+    Reads from:
+        backtest_dataset/pending_candles_{timeframe}.parquet
+
+    Appends trades to:
+        backtest_dataset/full/{timeframe}/trades/{strategy}/
+            {strategy}_full_{timeframe}_trades.parquet
+
+    Designed to be called daily (via cronjob) after update_full_dataset runs
+    so the trades files are always up to date without a full re-backtest.
+    """
+    pending_path = Path(f'backtest_dataset/pending_candles_{timeframe}.parquet')
+
+    if not pending_path.exists():
+        print(f"Pending candles file {pending_path} does not exist — nothing to do.")
+        return
+
+    df = pd.read_parquet(pending_path)
+    if df.empty:
+        print(f"Pending candles file {pending_path} is empty — nothing to do.")
+        return
+
+    df['date'] = pd.to_datetime(df['date'])
+
+    folder_path = Path(f'backtest_dataset/full/{timeframe}/trades/{strategy_fn.__name__}')
+    folder_path.mkdir(parents=True, exist_ok=True)
+    output_file = folder_path / f'{strategy_fn.__name__}_full_{timeframe}_trades.parquet'
+
+    print(f'Pending candles: {len(df)} rows across {df["ticker"].nunique()} tickers')
+
+    counter = 0
+    df_dict = {}
+    index = 0
+    total_trades = 0
+
+    start_time = tm.perf_counter()
+
+    # Group by ticker so all dates for the same ticker land in one df_dict entry
+    for ticker, ticker_df in df.groupby('ticker'):
+        ticker_data = ticker_df.set_index('date').sort_index()
+        len_ticker  = len(ticker_data)
+
+        if len_ticker <= 50:
+            continue
+
+        if counter >= 100_000:
+            index += 1
+            print(f'Processing backtest for {len(df_dict)} tickers at iteration {index}...')
+            trades = strategy_fn(df_dict)
+            sc.save_trades_to_file(trades, file_path=str(output_file), append=append_trades)
+            total_trades += len(trades)
+            print(f'Trades generated in iteration {index}: {len(trades)}')
+            counter = 0
+            df_dict = {}
+
+        counter += len_ticker
+        df_dict[ticker] = ticker_data
+
+    # Final flush
+    if counter > 0:
+        index += 1
+        print(f'Processing backtest for {len(df_dict)} tickers at iteration {index}...')
+        trades = strategy_fn(df_dict)
+        sc.save_trades_to_file(trades, file_path=str(output_file), append=append_trades)
+        total_trades += len(trades)
+        print(f'Trades generated in iteration {index}: {len(trades)}')
+
+    end_time = tm.perf_counter()
+    print(
+        f"⏰ Tiempo total incremental/{timeframe} ({strategy_fn.__name__}): "
+        f"{end_time - start_time:.2f}s | Total trades: {total_trades}"
+    )
+    print(f'Finalizing with {index} iterations')
+
+
+def run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=True):
+    
+    run_backtest_incremental(timeframe="5m", strategy_fn=strategy_fn, append_trades=append_trades)
+    run_backtest_incremental(timeframe="15m", strategy_fn=strategy_fn, append_trades=append_trades)
+    
+    return
+
+
+def run_incremental_backtest_all_strategies():
+    
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=False)
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=False)
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    
+    return
+
 def run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=True):
     """Run full dataset backtest for both 5m and 15m timeframes."""
     run_backtest_full_out_of_sample_dataset(timeframe="5m", strategy_fn=strategy_fn, append_trades=append_trades)

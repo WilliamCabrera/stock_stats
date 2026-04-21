@@ -50,8 +50,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-OUTPUT_BASE          = Path("backtest_dataset/full")
-PENDING_BACKTEST_PATH = Path("backtest_dataset/pending_backtest.parquet")
+OUTPUT_BASE             = Path("backtest_dataset/full")
+PENDING_BACKTEST_PATH   = Path("backtest_dataset/pending_backtest.parquet")
+PENDING_CANDLES_5M_PATH = Path("backtest_dataset/pending_candles_5m.parquet")
+PENDING_CANDLES_15M_PATH = Path("backtest_dataset/pending_candles_15m.parquet")
+
+_PENDING_CANDLES_PATH: dict[str, Path] = {
+    "5m":  PENDING_CANDLES_5M_PATH,
+    "15m": PENDING_CANDLES_15M_PATH,
+}
 
 # Extra calendar days fetched before the target window for indicator warmup.
 _LOOKBACK_DAYS: dict[str, int] = {
@@ -255,6 +262,41 @@ def _upsert_ticker_parquet(df: pd.DataFrame, timeframe: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 4b — pending candles queue (one file per timeframe)
+# ---------------------------------------------------------------------------
+
+def _upsert_pending_candles(new_df: pd.DataFrame, timeframe: str) -> None:
+    """
+    Upsert new candle rows into pending_candles_{timeframe}.parquet.
+
+    The file holds only the ticker-days added in the latest update run so
+    the backtest pipeline can re-run strategies on new data without touching
+    the full dataset.  Rows are keyed by (ticker, date_str); re-running the
+    update for the same dates replaces rather than duplicates them.
+    """
+    if new_df.empty:
+        return
+
+    path = _PENDING_CANDLES_PATH[timeframe]
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        existing = pd.read_parquet(path)
+        key      = set(zip(new_df["ticker"], new_df["date_str"]))
+        existing = existing[
+            ~existing.apply(lambda r: (r["ticker"], r["date_str"]) in key, axis=1)
+        ]
+        new_df = pd.concat([existing, new_df], ignore_index=True)
+
+    new_df = new_df.sort_values(["ticker", "date"]).reset_index(drop=True)
+    new_df.to_parquet(path, index=False, compression="zstd")
+    logger.info(
+        "pending_candles_%s: %d rows queued → %d total  (%.1f MB)",
+        timeframe, len(new_df), len(new_df), path.stat().st_size / 1e6,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Step 6 — pending backtest queue
 # ---------------------------------------------------------------------------
 
@@ -355,6 +397,7 @@ def run(dry_run: bool = False) -> None:
 
             for_full[tf].append(df_tf)
             _upsert_ticker_parquet(df_tf, tf)
+            _upsert_pending_candles(df_tf, tf)
 
     # Step 4 — write full_dataset.parquet for each timeframe
     for tf in TIMEFRAMES:

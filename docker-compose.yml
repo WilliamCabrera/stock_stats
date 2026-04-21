@@ -38,6 +38,10 @@ services:
       ofelia.job-exec.update-full-dataset.command: >-
         python -m scripts.update_full_dataset
       ofelia.job-exec.update-full-dataset.save-folder: /logs
+      ofelia.job-exec.incremental-backtest.schedule: "0 0 4 * * *"
+      ofelia.job-exec.incremental-backtest.command: >-
+        python -c "from strategies.vectorbt.run_backtest import run_incremental_backtest_all_strategies; run_incremental_backtest_all_strategies()"
+      ofelia.job-exec.incremental-backtest.save-folder: /logs
 
   # ── Ofelia — cron scheduler (runs incremental pipeline every Friday 21:00 ET)
   ofelia:

@@ -84,6 +84,33 @@ python -m scripts.plot_trade --ticker ABOS --date 2022-09-28
 
 ---
 
+## Automated daily pipeline
+
+Three jobs run automatically every day via **Ofelia** (the Docker-based cron scheduler). They execute inside the `pipeline` container and are defined in `docker-compose.yml`.
+
+| Hora (ET) | Job                    | Descripción                                    |
+|-----------|------------------------|------------------------------------------------|
+| **20:30** | `incremental-pipeline` | Ingesta de datos de mercado en PostgreSQL      |
+| **02:00** | `update-full-dataset`  | Fetchea velas 5m/15m y actualiza los parquets  |
+| **04:00** | `incremental-backtest` | Corre todas las estrategias sobre datos nuevos |
+
+**20:30 — `incremental-pipeline`**
+Detecta los tickers con actividad reciente (gappers, movers), fetchea sus datos OHLCV del día desde Massive.com, los inserta/actualiza en la tabla `stock_data` de PostgreSQL y refresca la vista materializada `stock_data_filtered` para que solo queden los tickers que cumplen los filtros de calidad (gap > 40 %, prev-close > $0.10, etc.).
+
+**02:00 — `update-full-dataset`**
+Lee `stock_data_filtered` para encontrar los ticker-días nuevos (fecha > última fecha en el parquet). Para cada uno fetchea las velas de 5m y 15m desde Massive, calcula los indicadores (ATR, VWAP, RVOL, SMAs, Donchian) y actualiza cuatro destinos: `full_dataset.parquet`, el fichero por ticker en `tickers/`, y los ficheros temporales `pending_candles_5m.parquet` / `pending_candles_15m.parquet`. También encola los ticker-días en `pending_backtest.parquet` para uso posterior.
+
+**04:00 — `incremental-backtest`**
+Lee `pending_candles_5m.parquet` y `pending_candles_15m.parquet` generados en el paso anterior y corre todas las estrategias (`backside_short_lower_low`, `short_push_exhaustion`, `gap_crap_strategy`) sobre esos datos. Los trades resultantes se agregan (append) a los ficheros de trades de cada estrategia en `full/{timeframe}/trades/`, manteniéndolos siempre al día sin necesidad de re-ejecutar el backtest histórico completo.
+
+```
+20:30 → stock_data (PostgreSQL) → stock_data_filtered (MV refresh)
+02:00 → full_dataset.parquet + tickers/ + pending_candles_*.parquet
+04:00 → full/{5m,15m}/trades/{strategy}/*_trades.parquet  (append)
+```
+
+---
+
 ## Dataset layout
 
 ```

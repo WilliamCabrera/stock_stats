@@ -3,7 +3,7 @@ WORKERS ?= 1
 PROCS   ?= 4
 CONCUR  ?= 10
 
-.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts
+.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts reload-scheduler
 
 ## Build all images (no cache)
 build:
@@ -79,6 +79,10 @@ test:
 test-file:
 	$(COMPOSE) exec api python -m pytest $(FILE) -v
 
+
+## Recreate pipeline + ofelia so Ofelia picks up updated labels from docker-compose
+reload-scheduler:
+	$(COMPOSE) up -d --force-recreate pipeline ofelia
 
 pipeline-data-collection:
 	docker exec -it backtester_api-api-1 python3 app/utils/pipeline_data_collection.py

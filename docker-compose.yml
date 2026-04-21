@@ -34,6 +34,10 @@ services:
       ofelia.job-exec.incremental-pipeline.command: >-
         python -c "from app.utils.pipeline_data_collection import run_incremental_v1; run_incremental_v1()"
       ofelia.job-exec.incremental-pipeline.save-folder: /logs
+      ofelia.job-exec.update-full-dataset.schedule: "0 0 2 * * *"
+      ofelia.job-exec.update-full-dataset.command: >-
+        python -m scripts.update_full_dataset
+      ofelia.job-exec.update-full-dataset.save-folder: /logs
 
   # ── Ofelia — cron scheduler (runs incremental pipeline every Friday 21:00 ET)
   ofelia:

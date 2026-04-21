@@ -559,13 +559,12 @@ def analysis_and_plot(trades: pd.DataFrame, initial_capital: float, risk_pct: fl
    
 
     # ============================================================
-    # Construir equity
+    # Construir equity y comprimir a diario
     # ============================================================
     equity_df = equity_from_r(trades, initial_capital=initial_capital, risk_pct=risk_pct)
-    equity_df.index.name = "entry_time"
     equity_df.index = pd.to_datetime(equity_df.index)
-    equity = equity_df["equity"]  # Tomar la columna de equity
-    
+    equity = equity_df["equity"].resample("D").last().dropna()
+
     # ============================================================
     # Resumen
     # ============================================================

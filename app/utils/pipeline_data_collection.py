@@ -743,6 +743,31 @@ async def _fetch_latest_stock_date() -> date | None:
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def refresh_materialized_view() -> None:
+    """
+    Trigger REFRESH MATERIALIZED VIEW stock_data_filtered via PostgREST RPC.
+
+    Requires the refresh_stock_data_filtered() SQL function to exist in the DB
+    (see scripts/migrate_add_refresh_rpc.sql).  The function is SECURITY
+    DEFINER so web_admin can call it even though it doesn't own the view.
+    """
+    settings      = get_settings()
+    url           = settings.postgrest_url.rstrip("/") + "/rpc/refresh_stock_data_filtered"
+    headers       = {
+        "Authorization": f"Bearer {settings.postgrest_token}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal",
+    }
+    try:
+        with httpx.Client(timeout=120) as client:
+            resp = client.post(url, headers=headers, json={})
+            resp.raise_for_status()
+        logger.info("stock_data_filtered refreshed successfully.")
+    except Exception as exc:
+        logger.error("Failed to refresh stock_data_filtered: %s", exc, exc_info=True)
+        raise
+
+
 def fetch_stock_data_filtered(page_size: int = 10_000) -> pd.DataFrame:
     """
     Fetch all rows from the stock_data_filtered materialized view via PostgREST.
@@ -862,6 +887,9 @@ def run_incremental_v1():
 
     logger.info("Incremental pipeline: %d chunks across %d tickers.", len(all_chunks), len(tickers))
     main_multiprocess_pipeline(parameters=all_chunks, num_processes=8, connectionParams={})
+
+    logger.info("Refreshing stock_data_filtered materialized view...")
+    refresh_materialized_view()
 
 
 if __name__ == "__main__":

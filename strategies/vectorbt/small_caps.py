@@ -1547,7 +1547,7 @@ def example_with_api_data(ticker: str, date: str,timeframe: str| None = None, AT
 # print(trades)
 
 #example_with_api_data(ticker="CREG", date="2026-04-10",timeframe="5m", ATR_FACTOR=[3.5, 2.0])
-example_with_api_data(ticker="TOPS", date="2022-10-04",timeframe="5m", ATR_FACTOR=[3.5, 2.0], strategy_func=backside_short_lower_low)
+#example_with_api_data(ticker="TOPS", date="2022-10-04",timeframe="5m", ATR_FACTOR=[3.5, 2.0], strategy_func=backside_short_lower_low)
 
 # trades_path =  'backtest_dataset/walkforward/5m/fold_1/trades/backside_short_lower_low/backside_short_lower_low_in_sample_trades.parquet'
 # trades =  pd.read_parquet(trades_path)

@@ -267,12 +267,16 @@ def run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_
 
 
 def run_incremental_backtest_all_strategies():
-    
+
     run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=False)
     run_backtest_incremental_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=False)
     run_backtest_incremental_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    
-    return
+
+    for tf in ("5m", "15m"):
+        p = Path(f'backtest_dataset/pending_candles_{tf}.parquet')
+        if p.exists():
+            p.unlink()
+            print(f'Deleted {p}')
 
 def run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=True):
     """Run full dataset backtest for both 5m and 15m timeframes."""

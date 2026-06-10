@@ -135,15 +135,47 @@ Three jobs run automatically every day via **Ofelia** (the Docker-based cron sch
 Detecta los tickers con actividad reciente (gappers, movers), fetchea sus datos OHLCV del día desde Massive.com, los inserta/actualiza en la tabla `stock_data` de PostgreSQL y refresca la vista materializada `stock_data_filtered` para que solo queden los tickers que cumplen los filtros de calidad (gap > 40 %, prev-close > $0.10, etc.).
 
 **02:00 — `update-full-dataset`**
-Lee `stock_data_filtered` para encontrar los ticker-días nuevos (fecha > última fecha en el parquet). Para cada uno fetchea las velas de 5m y 15m desde Massive, calcula los indicadores (ATR, VWAP, RVOL, SMAs, Donchian) y actualiza cuatro destinos: `full_dataset.parquet`, el fichero por ticker en `tickers/`, y los ficheros temporales `pending_candles_5m.parquet` / `pending_candles_15m.parquet`. También encola los ticker-días en `pending_backtest.parquet` para uso posterior.
+Lee `stock_data_filtered` para encontrar los ticker-días nuevos (fecha > última fecha en el parquet). Para cada uno fetchea las velas de 5m y 15m desde Massive, calcula los indicadores (ATR, VWAP, RVOL, SMAs, Donchian) y actualiza cinco destinos: `full_dataset.parquet`, el fichero por ticker en `tickers/`, los ficheros por fecha en `dates/` (`YYYY_MM_DD.parquet`), y los ficheros temporales `pending_candles_5m.parquet` / `pending_candles_15m.parquet`.
 
 **04:00 — `incremental-backtest`**
 Lee `pending_candles_5m.parquet` y `pending_candles_15m.parquet` generados en el paso anterior y corre todas las estrategias (`backside_short_lower_low`, `short_push_exhaustion`, `gap_crap_strategy`) sobre esos datos. Los trades resultantes se agregan (append) a los ficheros de trades de cada estrategia en `full/{timeframe}/trades/`, manteniéndolos siempre al día sin necesidad de re-ejecutar el backtest histórico completo.
 
 ```
 20:30 → stock_data (PostgreSQL) → stock_data_filtered (MV refresh)
-02:00 → full_dataset.parquet + tickers/ + pending_candles_*.parquet
+02:00 → full_dataset.parquet + tickers/ + dates/ + pending_candles_*.parquet
 04:00 → full/{5m,15m}/trades/{strategy}/*_trades.parquet  (append)
+```
+
+---
+
+## Despliegue y actualización de contenedores
+
+Los scripts se montan como volumen (`.:/app`), por lo que los cambios en archivos `.py` se reflejan inmediatamente sin necesidad de rebuild. Sin embargo, **Ofelia** lee los labels del contenedor `pipeline` al arrancar, por lo que cualquier cambio en `docker-compose.yml` requiere recrear el contenedor.
+
+### Actualizar solo scripts (sin cambios en dependencias ni `docker-compose.yml`)
+
+No se requiere ninguna acción — el siguiente cronjob ya usará el código nuevo.
+
+### Actualizar tras cambios en `docker-compose.yml` (labels de Ofelia, variables de entorno, recursos)
+
+```bash
+docker compose up -d --force-recreate pipeline
+```
+
+Esto recrea el contenedor con la nueva configuración sin reconstruir la imagen.
+
+### Actualizar tras cambios en `Dockerfile` o `requirements.txt`
+
+```bash
+docker compose up -d --build pipeline
+```
+
+Esto reconstruye la imagen e inicia el contenedor con ella.
+
+### Reiniciar todo el stack
+
+```bash
+docker compose down && docker compose up -d
 ```
 
 ---

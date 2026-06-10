@@ -297,8 +297,41 @@ def _upsert_pending_candles(new_df: pd.DataFrame, timeframe: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — pending backtest queue
+# Step 6 — dates directory (one file per trading date)
 # ---------------------------------------------------------------------------
+
+def _upsert_dates_dir(new_df: pd.DataFrame, timeframe: str) -> None:
+    """
+    Write/upsert per-date parquet files in full/{timeframe}/dates/.
+
+    For each date_str in new_df:
+      - If the file doesn't exist, create it.
+      - If it exists, merge: remove stale rows for the same (ticker, date_str)
+        and append the new ones.
+
+    Filename convention: YYYY_MM_DD.parquet  (dashes → underscores).
+    """
+    if new_df.empty:
+        return
+
+    dates_dir = OUTPUT_BASE / timeframe / "dates"
+    dates_dir.mkdir(parents=True, exist_ok=True)
+
+    for date_str, group in new_df.groupby("date_str", sort=True):
+        filename = date_str.replace("-", "_") + ".parquet"
+        path = dates_dir / filename
+
+        if path.exists():
+            existing = pd.read_parquet(path)
+            existing = existing[~existing["ticker"].isin(group["ticker"])]
+            group = pd.concat([existing, group], ignore_index=True)
+
+        group = group.sort_values(["ticker", "date"]).reset_index(drop=True)
+        group.to_parquet(path, index=False, compression="zstd")
+        logger.debug("dates/%s  %s  rows=%d", filename, timeframe, len(group))
+
+    n_dates = new_df["date_str"].nunique()
+    logger.info("dates/ updated for %s: %d date file(s) written.", timeframe, n_dates)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +399,7 @@ def run(dry_run: bool = False) -> None:
             _upsert_ticker_parquet(df_tf, tf)
             _upsert_pending_candles(df_tf, tf)
 
-    # Step 4 — write full_dataset.parquet for each timeframe
+    # Step 4 — write full_dataset.parquet and dates/ for each timeframe
     for tf in TIMEFRAMES:
         parts = for_full[tf]
         if not parts:
@@ -374,8 +407,7 @@ def run(dry_run: bool = False) -> None:
             continue
         new_df = pd.concat(parts, ignore_index=True).sort_values(["ticker", "date"])
         _upsert_full_dataset(new_df, tf)
-
-   
+        _upsert_dates_dir(new_df, tf)
 
     logger.info("Update complete.")
 

@@ -6,6 +6,7 @@ import pandas as pd
 pd.options.display.float_format = '{:.3f}'.format
 
 import json
+import logging
 import functools
 import numpy as np
 #from utils import helpers
@@ -24,10 +25,29 @@ from app.utils.charts import plot_candles_df, trades_to_markers, CHARTS_DIR, _wr
 from app.utils.indicators import compute_close_atr_band, compute_vwap
 from app.utils.massive import fetch_candles
 from app.utils.trade_metrics import (analysis_and_plot, summary_report, get_mae_mfe)
+from strategies.iterative.strategy_base import enforce_schema
 
 DATASET_ROOT   = Path(os.path.abspath(".")) / "backtest_dataset" / "full"
 DATASET_ROOT_1 = Path(__file__).resolve().parent
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+_LOG_DIR = Path(os.path.abspath(".")) / "logs" / "iterative"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(logging.Formatter("%(message)s"))
+
+_file_handler = logging.FileHandler(_LOG_DIR / "small_caps.log", encoding="utf-8")
+_file_handler.setLevel(logging.WARNING)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(_console_handler)
+logger.addHandler(_file_handler)
 
 def plot_ticker(
     ticker: str,
@@ -305,6 +325,7 @@ def backside_short_lower_low_fix_stop_iterative(
 
     df = candles.reset_index(drop=True)
     if len(df) < 3:
+        logger.debug("%-6s  skipped — less than 3 candles", candles["ticker"].iloc[0] if len(candles) else "?")
         return pd.DataFrame()
 
     ticker = df["ticker"].iloc[0]
@@ -473,8 +494,356 @@ def backside_short_lower_low_fix_stop_iterative(
             signal_volume     = row["volume"]
             signal_rvol       = row["RVOL_daily"]
             signal_prev_close = row["previous_day_close"]
+            logger.debug("SIGNAL  %-6s  %s  bar=%s  close=%.4f", ticker, row["date_str"], row["date"], row["close"])
 
-    return pd.DataFrame(trades)
+    n_trades = len(trades)
+    logger.debug("%-6s  %s  → %d trade(s)", ticker, df["date_str"].iloc[0], n_trades)
+    return enforce_schema(pd.DataFrame(trades))
+
+def gap_crap_iterative(
+    candles: pd.DataFrame,
+    gap_pct: float = 0.40,
+    stop_pct: float = 0.5,
+    tp_pct: float = 0.20,
+    slippage: float = 0.001,
+    timeframe_minutes: int = 5,
+) -> pd.DataFrame:
+    """
+    Short iterativo: si el close de la vela de las 9:25 AM supera gap_pct sobre el
+    cierre del día anterior, abre short al open de la siguiente barra.
+
+    Condición de entrada (barra 9:25):
+      1. close[9:25] >= previous_day_close * (1 + gap_pct)
+
+    Entrada:  open de la vela siguiente (sin filtro no_gap — la barra de 9:25 es
+              pre-mercado y la siguiente siempre es 9:30, el open regular)
+    SL:       entry * (1 + stop_pct)
+    TP:       entry * (1 - tp_pct)
+    Cierre forzado en la última vela antes de las 16:00.
+    """
+    STRATEGY = f"gap_crap_iterative_{gap_pct}_{stop_pct}_{tp_pct}"
+    CLOSE_HOUR = 16
+
+    df = candles.reset_index(drop=True)
+    if len(df) < 3:
+        logger.debug("%-6s  skipped — less than 3 candles", candles["ticker"].iloc[0] if len(candles) else "?")
+        return pd.DataFrame()
+
+    ticker = df["ticker"].iloc[0]
+
+    before_close = df["date"].dt.hour < CLOSE_HOUR
+    if not before_close.any():
+        return pd.DataFrame()
+    last_valid_idx = before_close[before_close].index[-1]
+
+    signal_time = (df["date"].dt.hour == 9) & (df["date"].dt.minute == 25)
+    gap_cond    = df["close"] >= df["previous_day_close"] * (1 + gap_pct)
+    signal      = signal_time & gap_cond
+
+    trades: list[dict] = []
+    position       = None
+    pending_entry  = False
+    pending_exit   = False
+    entry_price    = sl_price = tp_price = 0.0
+    entry_time     = entry_volume = entry_date_str = None
+    signal_volume  = signal_rvol = signal_prev_close = None
+    trade_highs: list[float] = []
+    trade_lows:  list[float] = []
+
+    for i in range(1, last_valid_idx + 1):
+        row = df.iloc[i]
+
+        if pending_exit:
+            exit_price = row["open"] * (1 + slippage)
+            pnl = entry_price - exit_price
+            rr  = (entry_price - tp_price) / (sl_price - entry_price)
+            mae = max(trade_highs) - entry_price
+            mfe = entry_price - min(trade_lows)
+            trades.append({
+                "ticker":             ticker,
+                "date_str":           entry_date_str,
+                "type":               "short",
+                "entry_price":        entry_price,
+                "exit_price":         exit_price,
+                "stop_loss_price":    round(sl_price, 4),
+                "take_profit_price":  round(tp_price, 4),
+                "risk_reward_ratio":  round(rr, 4),
+                "pnl":                round(pnl, 4),
+                "Return":             round(pnl / entry_price, 4),
+                "MAE":                round(mae, 4),
+                "mae_pct":            round(mae / entry_price * 100, 4),
+                "MFE":                round(mfe, 4),
+                "mfe_pct":            round(mfe / entry_price * 100, 4),
+                "rvol_daily":         signal_rvol,
+                "previous_day_close": signal_prev_close,
+                "volume":             signal_volume,
+                "entry_volume":       entry_volume,
+                "entry_time":         entry_time,
+                "exit_time":          row["date"],
+                "strategy":           STRATEGY,
+            })
+            position     = None
+            pending_exit = False
+            trade_highs  = []
+            trade_lows   = []
+            continue
+
+        if pending_entry:
+            entry_price    = row["open"] * (1 - slippage)
+            sl_price       = entry_price * (1 + stop_pct)
+            tp_price       = entry_price * (1 - tp_pct)
+            entry_time     = row["date"]
+            entry_volume   = row["volume"]
+            entry_date_str = row["date_str"]
+            position       = "short"
+            pending_entry  = False
+            trade_highs    = [row["high"]]
+            trade_lows     = [row["low"]]
+
+        elif position == "short":
+            trade_highs.append(row["high"])
+            trade_lows.append(row["low"])
+
+        if position == "short":
+            hit_tp  = row["low"]  <= tp_price
+            hit_sl  = row["high"] >= sl_price
+            is_last = i == last_valid_idx
+
+            if (hit_tp or hit_sl) and not is_last:
+                pending_exit = True
+            elif is_last:
+                exit_price = row["close"] * (1 + slippage)
+                pnl = entry_price - exit_price
+                rr  = (entry_price - tp_price) / (sl_price - entry_price)
+                mae = max(trade_highs) - entry_price
+                mfe = entry_price - min(trade_lows)
+                trades.append({
+                    "ticker":             ticker,
+                    "date_str":           entry_date_str,
+                    "type":               "short",
+                    "entry_price":        entry_price,
+                    "exit_price":         exit_price,
+                    "stop_loss_price":    round(sl_price, 4),
+                    "take_profit_price":  round(tp_price, 4),
+                    "risk_reward_ratio":  round(rr, 4),
+                    "pnl":                round(pnl, 4),
+                    "Return":             round(pnl / entry_price, 4),
+                    "MAE":                round(mae, 4),
+                    "mae_pct":            round(mae / entry_price * 100, 4),
+                    "MFE":                round(mfe, 4),
+                    "mfe_pct":            round(mfe / entry_price * 100, 4),
+                    "rvol_daily":         signal_rvol,
+                    "previous_day_close": signal_prev_close,
+                    "volume":             signal_volume,
+                    "entry_volume":       entry_volume,
+                    "entry_time":         entry_time,
+                    "exit_time":          row["date"],
+                    "strategy":           STRATEGY,
+                })
+                position    = None
+                trade_highs = []
+                trade_lows  = []
+
+        # Señal: solo en la barra de las 9:25 AM — no se verifica no_gap porque
+        # la siguiente barra siempre es el open regular (9:30)
+        next_i = i + 1
+        if (
+            position is None
+            and signal.iloc[i]
+            and next_i <= last_valid_idx
+        ):
+            pending_entry     = True
+            signal_volume     = row["volume"]
+            signal_rvol       = row["RVOL_daily"]
+            signal_prev_close = row["previous_day_close"]
+            logger.debug("SIGNAL  %-6s  %s  bar=%s  close=%.4f", ticker, row["date_str"], row["date"], row["close"])
+
+    n_trades = len(trades)
+    logger.debug("%-6s  %s  → %d trade(s)", ticker, df["date_str"].iloc[0], n_trades)
+    return enforce_schema(pd.DataFrame(trades))
+
+
+def short_push_exhaustion_iterative(
+    candles: pd.DataFrame,
+    gap_pct: float = 0.40,
+    stop_pct: float = 0.5,
+    tp_pct: float = 0.20,
+    slippage: float = 0.001,
+    timeframe_minutes: int = 5,
+) -> pd.DataFrame:
+    """
+    Short iterativo: desaceleración del push alcista medida por una vela roja con
+    topping tail >= 1.5x la distancia (open - low), por encima de VWAP, con volumen
+    superior al de la barra anterior y > 40 000.
+
+    Condiciones de entrada (barra i):
+      1. Vela roja (close < open)
+      2. Topping tail (high - open) >= 1.5 * (open - low)   — upper shadow dominante
+      3. open[i] > vwap[i-1]                                 — por encima de VWAP
+      4. volume[i] > volume[i-1]  AND  volume[i] > 40 000
+      5. (high[i] - low[i]) >= 0.20 * (high[i-1] - low[i-1])  — range mínimo 20% del anterior
+      6. high[i] >= previous_day_close * (1 + gap_pct)       — contexto de gap-up
+      7. bar[i-1] es el verdadero anterior (sin huecos)
+
+    Entrada:  open de la vela siguiente
+    SL:       entry * (1 + stop_pct)
+    TP:       entry * (1 - tp_pct)
+    Cierre forzado en la última vela antes de las 16:00.
+    """
+    STRATEGY = f"short_push_exhaustion_iterative_{gap_pct}_{stop_pct}_{tp_pct}"
+    CLOSE_HOUR = 16
+    expected_delta = pd.Timedelta(minutes=timeframe_minutes)
+    MIN_VOLUME = 40_000
+
+    df = candles.reset_index(drop=True)
+    if len(df) < 3:
+        logger.debug("%-6s  skipped — less than 3 candles", candles["ticker"].iloc[0] if len(candles) else "?")
+        return pd.DataFrame()
+
+    ticker = df["ticker"].iloc[0]
+
+    before_close = df["date"].dt.hour < CLOSE_HOUR
+    if not before_close.any():
+        return pd.DataFrame()
+    last_valid_idx = before_close[before_close].index[-1]
+
+    no_gap      = df["date"].diff() == expected_delta
+    prev_vwap   = df["vwap"].shift(1)
+    prev_volume = df["volume"].shift(1)
+
+    red           = df["close"] < df["open"]
+    topping_tail  = df["high"] - df["open"]
+    low_to_open   = (df["open"] - df["low"]).clip(lower=1e-8)   # evitar /0
+    exhaustion    = topping_tail >= 1.5 * low_to_open
+    above_vwap    = df["open"] > prev_vwap
+    vol_surge     = (df["volume"] > prev_volume) & (df["volume"] > MIN_VOLUME)
+    gap_cond      = df["high"] >= df["previous_day_close"] * (1 + gap_pct)
+    prev_range    = (df["high"].shift(1) - df["low"].shift(1)).clip(lower=1e-8)
+    range_filter  = (df["high"] - df["low"]) >= 0.20 * prev_range
+
+    signal = red & exhaustion & above_vwap & vol_surge & gap_cond & range_filter & no_gap
+
+    trades: list[dict] = []
+    position       = None
+    pending_entry  = False
+    pending_exit   = False
+    entry_price    = sl_price = tp_price = 0.0
+    entry_time     = entry_volume = entry_date_str = None
+    signal_volume  = signal_rvol = signal_prev_close = None
+    trade_highs: list[float] = []
+    trade_lows:  list[float] = []
+
+    for i in range(1, last_valid_idx + 1):
+        row = df.iloc[i]
+
+        if pending_exit:
+            exit_price = row["open"] * (1 + slippage)
+            pnl = entry_price - exit_price
+            rr  = (entry_price - tp_price) / (sl_price - entry_price)
+            mae = max(trade_highs) - entry_price
+            mfe = entry_price - min(trade_lows)
+            trades.append({
+                "ticker":             ticker,
+                "date_str":           entry_date_str,
+                "type":               "short",
+                "entry_price":        entry_price,
+                "exit_price":         exit_price,
+                "stop_loss_price":    round(sl_price, 4),
+                "take_profit_price":  round(tp_price, 4),
+                "risk_reward_ratio":  round(rr, 4),
+                "pnl":                round(pnl, 4),
+                "Return":             round(pnl / entry_price, 4),
+                "MAE":                round(mae, 4),
+                "mae_pct":            round(mae / entry_price * 100, 4),
+                "MFE":                round(mfe, 4),
+                "mfe_pct":            round(mfe / entry_price * 100, 4),
+                "rvol_daily":         signal_rvol,
+                "previous_day_close": signal_prev_close,
+                "volume":             signal_volume,
+                "entry_volume":       entry_volume,
+                "entry_time":         entry_time,
+                "exit_time":          row["date"],
+                "strategy":           STRATEGY,
+            })
+            position     = None
+            pending_exit = False
+            trade_highs  = []
+            trade_lows   = []
+            continue
+
+        if pending_entry:
+            entry_price    = row["open"] * (1 - slippage)
+            sl_price       = entry_price * (1 + stop_pct)
+            tp_price       = entry_price * (1 - tp_pct)
+            entry_time     = row["date"]
+            entry_volume   = row["volume"]
+            entry_date_str = row["date_str"]
+            position       = "short"
+            pending_entry  = False
+            trade_highs    = [row["high"]]
+            trade_lows     = [row["low"]]
+
+        elif position == "short":
+            trade_highs.append(row["high"])
+            trade_lows.append(row["low"])
+
+        if position == "short":
+            hit_tp  = row["low"]  <= tp_price
+            hit_sl  = row["high"] >= sl_price
+            is_last = i == last_valid_idx
+
+            if (hit_tp or hit_sl) and not is_last:
+                pending_exit = True
+            elif is_last:
+                exit_price = row["close"] * (1 + slippage)
+                pnl = entry_price - exit_price
+                rr  = (entry_price - tp_price) / (sl_price - entry_price)
+                mae = max(trade_highs) - entry_price
+                mfe = entry_price - min(trade_lows)
+                trades.append({
+                    "ticker":             ticker,
+                    "date_str":           entry_date_str,
+                    "type":               "short",
+                    "entry_price":        entry_price,
+                    "exit_price":         exit_price,
+                    "stop_loss_price":    round(sl_price, 4),
+                    "take_profit_price":  round(tp_price, 4),
+                    "risk_reward_ratio":  round(rr, 4),
+                    "pnl":                round(pnl, 4),
+                    "Return":             round(pnl / entry_price, 4),
+                    "MAE":                round(mae, 4),
+                    "mae_pct":            round(mae / entry_price * 100, 4),
+                    "MFE":                round(mfe, 4),
+                    "mfe_pct":            round(mfe / entry_price * 100, 4),
+                    "rvol_daily":         signal_rvol,
+                    "previous_day_close": signal_prev_close,
+                    "volume":             signal_volume,
+                    "entry_volume":       entry_volume,
+                    "entry_time":         entry_time,
+                    "exit_time":          row["date"],
+                    "strategy":           STRATEGY,
+                })
+                position    = None
+                trade_highs = []
+                trade_lows  = []
+
+        next_i = i + 1
+        if (
+            position is None
+            and signal.iloc[i]
+            and next_i <= last_valid_idx
+            and no_gap.iloc[next_i]
+        ):
+            pending_entry     = True
+            signal_volume     = row["volume"]
+            signal_rvol       = row["RVOL_daily"]
+            signal_prev_close = row["previous_day_close"]
+            logger.debug("SIGNAL  %-6s  %s  bar=%s  close=%.4f", ticker, row["date_str"], row["date"], row["close"])
+
+    n_trades = len(trades)
+    logger.debug("%-6s  %s  → %d trade(s)", ticker, df["date_str"].iloc[0], n_trades)
+    return enforce_schema(pd.DataFrame(trades))
+
 
 def run_backtest(
     timeframe: str,
@@ -527,12 +896,12 @@ def run_backtest(
     if strategy_func is None:
         return pd.DataFrame()
     
-    if out_put_name is None:
-        out_put_name = strategy_func.__name__
-
     # ── Nombre de la estrategia (soporta functools.partial) ──────────────
     _func = strategy_func.func if isinstance(strategy_func, functools.partial) else strategy_func
     strategy_name = _func.__name__
+
+    if out_put_name is None:
+        out_put_name = f"{strategy_name}_{gap_pct}_{stop_pct}_{tp_pct}"
 
     # ── Rutas de salida y checkpoint ─────────────────────────────────────
     _out_dir = Path(out_dir) if out_dir is not None else DATASET_ROOT_1 / "UP-TO-DATE" / timeframe / strategy_name
@@ -540,13 +909,15 @@ def run_backtest(
     out_path        = _out_dir / f"{out_put_name}.parquet"
     checkpoint_path = _out_dir / f"{out_put_name}_checkpoint.json"
 
+    logger.info("run_backtest  strategy=%s  tf=%s  params=%s  out=%s", strategy_name, timeframe, out_put_name, _out_dir)
+
     # ── Cargar checkpoint (resume) ────────────────────────────────────────
     resume_from: str | None = None
     if checkpoint_path.exists():
         try:
             ck = json.loads(checkpoint_path.read_text())
             resume_from = ck.get("last_completed_date")
-            print(f"[RESUME] Continuando desde {resume_from}")
+            logger.info("[RESUME] Continuando desde %s", resume_from)
         except Exception:
             pass
 
@@ -589,17 +960,20 @@ def run_backtest(
 
     tf_minutes = int(timeframe[:-1])
     total_dates = len(date_files)
+    logger.info("Procesando %d fechas  [%s → %s]", total_dates, _file_date(date_files[0]) if date_files else "?", _file_date(date_files[-1]) if date_files else "?")
+
+    total_trades_session = 0
 
     for idx, parquet_file in enumerate(date_files, 1):
         day_str = _file_date(parquet_file)
-        print(f"[{idx}/{total_dates}] {day_str}", end="  ", flush=True)
 
         try:
             day_df = pd.read_parquet(parquet_file)
         except Exception as e:
-            print(f"[WARN] No se pudo leer {parquet_file.name}: {e}")
+            logger.warning("[%d/%d] %s — error leyendo parquet: %s", idx, total_dates, day_str, e)
             continue
 
+        n_tickers = day_df["ticker"].nunique()
         day_trades: list[pd.DataFrame] = []
 
         for ticker in day_df["ticker"].unique():
@@ -616,7 +990,7 @@ def run_backtest(
                     timeframe_minutes=tf_minutes,
                 )
             except Exception as e:
-                print(f"[WARN] {ticker} {day_str}: {e}")
+                logger.warning("%-6s  %s — strategy error: %s", ticker, day_str, e)
                 continue
             if trades is not None and not trades.empty:
                 trades["timeframe"] = timeframe
@@ -625,9 +999,10 @@ def run_backtest(
         if day_trades:
             day_result = pd.concat(day_trades, ignore_index=True)
             _append_trades(day_result)
-            print(f"{len(day_result)} trades")
+            total_trades_session += len(day_result)
+            logger.info("[%d/%d] %s  tickers=%d  trades=%d", idx, total_dates, day_str, n_tickers, len(day_result))
         else:
-            print("0 trades")
+            logger.info("[%d/%d] %s  tickers=%d  trades=0", idx, total_dates, day_str, n_tickers)
 
         # ── Guardar checkpoint ────────────────────────────────────────────
         checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
@@ -635,79 +1010,196 @@ def run_backtest(
     # ── Backtest completado: borrar checkpoint ────────────────────────────
     if checkpoint_path.exists():
         checkpoint_path.unlink()
-        print(f"Checkpoint eliminado — backtest completo.")
+        logger.info("Checkpoint eliminado — backtest completo.")
 
     if not out_path.exists():
         return pd.DataFrame()
 
     result = pd.read_parquet(out_path)
-    print(f"Total trades en {out_path.name}: {len(result)}")
+    logger.info("run_backtest completo  strategy=%s  tf=%s  session_trades=%d  total_acumulado=%d  → %s",
+                strategy_name, timeframe, total_trades_session, len(result), out_path)
     return result
 
-    return result
+def run_walkforward_backtest(from_date: str | None = None, to_date: str | None = None, strategies: list | None = None):
+    """
+    Walk-forward backtest driven by STRATEGIES registry.
 
-def run_walkforward_backtest(  
-    strategy_func=None,
-    from_date: str | None = None,
-    to_date: str | None = None,
-    slippage: float = 0.001,
-    gap_pct: float = 0.40,
-    stop_pct: float = 0.50,
-    tp_pct: float = 0.20,
-    out_put_name=None):
-    
-    
-    out_put_name = f'{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}'
-    
+    For every entry in STRATEGIES, and for every params set in entry["params"],
+    runs run_backtest across all folds (IS + OOS) for both 5m and 15m timeframes.
+    """
     _t0 = tm.time()
-    # ======== 5 minutes ========
+    _strategies = strategies if strategies is not None else _default_strategies()
 
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/5m/fold_1/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/5m/tier_1/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/5m/fold_2/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/5m/tier_2/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/5m/fold_3/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/5m/tier_3/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/5m/fold_1/dates_OOS', out_dir=f'strategies/iterative/WF/OUT-OF-SAMPLE/5m/tier_1/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/5m/fold_3/dates_OOS', out_dir=f'strategies/iterative/WF/OUT-OF-SAMPLE/5m/tier_3/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
+    FOLDS = [
+        ("5m",  "fold_1", "IN-SAMPLE",     "dates_IS",  "tier_1"),
+        ("5m",  "fold_2", "IN-SAMPLE",     "dates_IS",  "tier_2"),
+        ("5m",  "fold_3", "IN-SAMPLE",     "dates_IS",  "tier_3"),
+        ("5m",  "fold_1", "OUT-OF-SAMPLE", "dates_OOS", "tier_1"),
+        ("5m",  "fold_2", "OUT-OF-SAMPLE", "dates_OOS", "tier_2"),
+        ("5m",  "fold_3", "OUT-OF-SAMPLE", "dates_OOS", "tier_3"),
+        ("15m", "fold_1", "IN-SAMPLE",     "dates_IS",  "tier_1"),
+        ("15m", "fold_2", "IN-SAMPLE",     "dates_IS",  "tier_2"),
+        ("15m", "fold_3", "IN-SAMPLE",     "dates_IS",  "tier_3"),
+        ("15m", "fold_1", "OUT-OF-SAMPLE", "dates_OOS", "tier_1"),
+        ("15m", "fold_2", "OUT-OF-SAMPLE", "dates_OOS", "tier_2"),
+        ("15m", "fold_3", "OUT-OF-SAMPLE", "dates_OOS", "tier_3"),
+    ]
 
-    # ======== 15 minutes ========
+    for entry in _strategies:
+        strategy_func = entry["strategy_func"]
+        strategy_name = entry["strategy_name"]
 
-    run_backtest(timeframe='15m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/walkforward/15m/fold_1/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/15m/tier_1/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='15m',strategy_func=strategy_func, from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct,dates_dir=f'backtest_dataset/walkforward/15m/fold_2/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/15m/tier_2/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='15m',strategy_func=strategy_func, from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct,dates_dir=f'backtest_dataset/walkforward/15m/fold_3/dates_IS', out_dir=f'strategies/iterative/WF/IN-SAMPLE/15m/tier_3/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='15m',strategy_func=strategy_func, from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct,dates_dir=f'backtest_dataset/walkforward/15m/fold_1/dates_OOS', out_dir=f'strategies/iterative/WF/OUT-OF-SAMPLE/15m/tier_1/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='15m',strategy_func=strategy_func, from_date=from_date, to_date=to_date,slippage=slippage,  gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct,dates_dir=f'backtest_dataset/walkforward/15m/fold_2/dates_OOS', out_dir=f'strategies/iterative/WF/OUT-OF-SAMPLE/15m/tier_2/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    run_backtest(timeframe='15m',strategy_func=strategy_func, from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct,dates_dir=f'backtest_dataset/walkforward/15m/fold_3/dates_OOS', out_dir=f'strategies/iterative/WF/OUT-OF-SAMPLE/15m/tier_3/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-    
-    print(f"run_backtest Walk-forward for {strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct} completado en {tm.time() - _t0:.2f}s")
-    
+        for p in entry["params"]:
+            slippage     = p["slippage"]
+            gap_pct      = p["gap_pct"]
+            stop_pct     = p["stop_pct"]
+            tp_pct       = p["tp_pct"]
+            out_put_name = p["out_put_name"]
+
+            logger.info("WF  strategy=%s  params=%s", strategy_name, out_put_name)
+
+            for tf, fold, split, dates_subdir, tier in FOLDS:
+                dates_dir = f"backtest_dataset/walkforward/{tf}/{fold}/{dates_subdir}"
+                out_dir   = f"strategies/iterative/WF/{split}/{tf}/{tier}/{out_put_name}"
+                run_backtest(
+                    timeframe=tf,
+                    strategy_func=strategy_func,
+                    from_date=from_date,
+                    to_date=to_date,
+                    slippage=slippage,
+                    gap_pct=gap_pct,
+                    stop_pct=stop_pct,
+                    tp_pct=tp_pct,
+                    dates_dir=dates_dir,
+                    out_dir=out_dir,
+                    out_put_name=out_put_name,
+                )
+
+    logger.info("run_walkforward_backtest completado en %.2fs", tm.time() - _t0)
+
+def run_up_to_date_backtest(from_date: str | None = None, to_date: str | None = None, strategies: list | None = None):
+    """
+    Up-to-date backtest driven by STRATEGIES registry.
+
+    For every entry in STRATEGIES, and for every params set in entry["params"],
+    runs run_backtest on the full dataset for both 5m and 15m timeframes.
+    """
+    _t0 = tm.time()
+    _strategies = strategies if strategies is not None else _default_strategies()
+
+    for entry in _strategies:
+        strategy_func = entry["strategy_func"]
+        strategy_name = entry["strategy_name"]
+
+        for p in entry["params"]:
+            slippage     = p["slippage"]
+            gap_pct      = p["gap_pct"]
+            stop_pct     = p["stop_pct"]
+            tp_pct       = p["tp_pct"]
+            out_put_name = p["out_put_name"]
+
+            logger.info("UP-TO-DATE  strategy=%s  params=%s", strategy_name, out_put_name)
+
+            for tf in ["5m", "15m"]:
+                run_backtest(
+                    timeframe=tf,
+                    strategy_func=strategy_func,
+                    from_date=from_date,
+                    to_date=to_date,
+                    slippage=slippage,
+                    gap_pct=gap_pct,
+                    stop_pct=stop_pct,
+                    tp_pct=tp_pct,
+                    dates_dir=f"backtest_dataset/full/{tf}/dates",
+                    out_dir=f"strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}",
+                    out_put_name=out_put_name,
+                )
+
+    logger.info("run_up_to_date_backtest completado en %.2fs", tm.time() - _t0)
+
+def run_iterative_incremental_backtest(strategies: list | None = None):
+    """
+    Incremental iterative backtest driven by STRATEGIES registry.
+
+    For every entry in STRATEGIES, and for every params set in entry["params"],
+    runs run_backtest on the pending dates for both 5m and 15m timeframes.
+
+    Reads pending dates from:
+        backtest_dataset/pending_candles_{5m,15m}.parquet
+    Reads candle data from:
+        backtest_dataset/full/{timeframe}/dates/{YYYY_MM_DD}.parquet
+    Appends trades to (same location as run_up_to_date_backtest):
+        strategies/iterative/UP-TO-DATE/{timeframe}/{out_put_name}/{out_put_name}.parquet
+    """
+    _t0 = tm.time()
+    _strategies = strategies if strategies is not None else _default_strategies()
+
+    pending_dates_cache: dict[str, list[str]] = {}
+
+    for entry in _strategies:
+        strategy_func = entry["strategy_func"]
+        strategy_name = entry["strategy_name"]
+
+        for p in entry["params"]:
+            slippage    = p["slippage"]
+            gap_pct     = p["gap_pct"]
+            stop_pct    = p["stop_pct"]
+            tp_pct      = p["tp_pct"]
+            out_put_name = p["out_put_name"]
+
+            logger.info("INCREMENTAL  strategy=%s  params=%s", strategy_name, out_put_name)
+
+            for timeframe in ["5m", "15m"]:
+                if timeframe not in pending_dates_cache:
+                    base_path = Path(os.path.abspath(".")) / "backtest_dataset"
+                    pending_path = base_path / f"pending_candles_{timeframe}.parquet"
+                    if not pending_path.exists():
+                        logger.info("[%s] No pending candles — skipping.", timeframe)
+                        pending_dates_cache[timeframe] = []
+                        continue
+                    pending_df = pd.read_parquet(pending_path, columns=["date_str"])
+                    if pending_df.empty:
+                        logger.info("[%s] Pending candles vacíos — skipping.", timeframe)
+                        pending_dates_cache[timeframe] = []
+                        continue
+                    pending_dates_cache[timeframe] = sorted(pending_df["date_str"].unique())
+
+                pending_dates = pending_dates_cache.get(timeframe, [])
+                if not pending_dates:
+                    continue
+
+                min_date = pending_dates[0]
+                max_date = pending_dates[-1]
+                logger.info("[%s] Pending dates: %s → %s (%d date(s))", timeframe, min_date, max_date, len(pending_dates))
+
+                run_backtest(
+                    timeframe=timeframe,
+                    strategy_func=strategy_func,
+                    from_date=min_date,
+                    to_date=max_date,
+                    slippage=slippage,
+                    gap_pct=gap_pct,
+                    stop_pct=stop_pct,
+                    tp_pct=tp_pct,
+                    dates_dir=f"backtest_dataset/full/{timeframe}/dates",
+                    out_dir=f"strategies/iterative/UP-TO-DATE/{timeframe}/{out_put_name}",
+                    out_put_name=out_put_name,
+                )
+
+    logger.info("run_iterative_incremental_backtest completado en %.2fs", tm.time() - _t0)
     return
 
-def  run_up_to_date_backtest(  
-    strategy_func=None,
-    from_date: str | None = None,
-    to_date: str | None = None,
-    slippage: float = 0.001,
-    gap_pct: float = 0.40,
-    stop_pct: float = 0.50,
-    tp_pct: float = 0.20,
-    out_put_name=None):
-    
-    out_put_name = f'{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}'
-    
-    _t0 = tm.time()
-    # ======== 5 minutes ========
-    run_backtest(timeframe='5m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/full/5m/dates', out_dir=f'strategies/iterative/UP-TO-DATE/5m/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
- 
-    # ======== 15 minutes =======
-    run_backtest(timeframe='15m',strategy_func=strategy_func,from_date=from_date, to_date=to_date,slippage=slippage, gap_pct=gap_pct, stop_pct=stop_pct, tp_pct=tp_pct, dates_dir=f'backtest_dataset/full/15m/dates', out_dir=f'strategies/iterative/UP-TO-DATE/15m/{strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct}', out_put_name=out_put_name)
-     
-    print(f"run_backtest Up-to-Date for {strategy_func.__name__}_{gap_pct}_{stop_pct}_{tp_pct} completado en {tm.time() - _t0:.2f}s")
-    
-    return 
 
+def _default_strategies() -> list:
+    from strategies.iterative.strategies_registry import STRATEGIES
+    return STRATEGIES
 
-_t0 = tm.time()
-#run_walkforward_backtest(strategy_func=backside_short_lower_low_fix_stop_iterative)
-#run_up_to_date_backtest(strategy_func=backside_short_lower_low_fix_stop_iterative)
-print(f"run_backtest full  completado en {tm.time() - _t0:.2f}s")
+if __name__ == "__main__":
+    # python -m scripts.split_dataset_by_date --timeframe 5m --input-file backtest_dataset/pending_candles_5m.parquet
+    #_t0 = tm.time()
+    run_walkforward_backtest()
+    run_up_to_date_backtest()
+    #print(f"run_backtest full  completado en {tm.time() - _t0:.2f}s")
+    pass
 
 

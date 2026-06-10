@@ -33,3 +33,6 @@ logs/
 *.swo
 
 backtest_dataset/
+strategies/iterative/UP-TO-DATE/
+strategies/iterative/WF/
+

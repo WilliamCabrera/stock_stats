@@ -201,6 +201,9 @@ async def list_trades(
     strategy: str = Query(..., description="Strategy folder name, e.g. backside_short_lower_low"),
     timeframe: str = Query(..., description="Timeframe folder name, e.g. 15m or 5m"),
     variant: str | None = Query(default=None, description="Filter by strategy column value; 'all' returns every variant"),
+    ticker: str | None = Query(default=None, description="Filter by ticker (case-insensitive)"),
+    date_from: str | None = Query(default=None, description="entry_time >= YYYY-MM-DD"),
+    date_to: str | None = Query(default=None, description="entry_time <= YYYY-MM-DD"),
     page: int = Query(default=1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(default=500, ge=1, le=2000, description="Trades per page"),
 ):
@@ -225,7 +228,19 @@ async def list_trades(
 
     # Filter by variant when a specific value is requested (not "all" / empty)
     if variant and variant.lower() not in ("all", ""):
-        all_trades = [t for t in all_trades if t.get("strategy") == variant]
+        variant_set = {v.strip() for v in variant.split(",") if v.strip()}
+        if variant_set:
+            all_trades = [t for t in all_trades if t.get("strategy") in variant_set]
+
+    if ticker:
+        ticker_upper = ticker.upper()
+        all_trades = [t for t in all_trades if (t.get("ticker") or "").upper() == ticker_upper]
+
+    # Date range filter — entry_time is serialized as "YYYY-MM-DDTHH:MM:SS"
+    if date_from:
+        all_trades = [t for t in all_trades if (t.get("entry_time") or "")[:10] >= date_from]
+    if date_to:
+        all_trades = [t for t in all_trades if (t.get("entry_time") or "")[:10] <= date_to]
 
     total = len(all_trades)
     pages = (total + page_size - 1) // page_size
@@ -263,6 +278,8 @@ class AnalysisFilters:
     volume_max: float | None
     time_from: str | None
     time_to: str | None
+    date_from: str | None
+    date_to: str | None
     initial_capital: float
     risk_pct: float
 
@@ -276,8 +293,10 @@ def _analysis_filters(
     price_max: float | None = Query(default=None, description="Max entry_price"),
     volume_min: float | None = Query(default=None, description="Min volume"),
     volume_max: float | None = Query(default=None, description="Max volume"),
-    time_from: str | None = Query(default=None, description="entry_time >= HH:MM"),
-    time_to: str | None = Query(default=None, description="entry_time <= HH:MM"),
+    time_from: str | None = Query(default=None, description="entry_time >= HH:MM (intraday)"),
+    time_to: str | None = Query(default=None, description="entry_time <= HH:MM (intraday)"),
+    date_from: str | None = Query(default=None, description="entry_time >= YYYY-MM-DD"),
+    date_to: str | None = Query(default=None, description="entry_time <= YYYY-MM-DD"),
     initial_capital: float = Query(default=1_000.0, description="Starting capital"),
     risk_pct: float = Query(default=0.01, ge=0.0, le=1.0, description="Risk per trade as fraction of capital (0.01 = 1%)"),
 ) -> AnalysisFilters:
@@ -286,6 +305,7 @@ def _analysis_filters(
         price_min=price_min, price_max=price_max,
         volume_min=volume_min, volume_max=volume_max,
         time_from=time_from, time_to=time_to,
+        date_from=date_from, date_to=date_to,
         initial_capital=initial_capital, risk_pct=risk_pct,
     )
 
@@ -298,7 +318,9 @@ def _apply_filters(f: AnalysisFilters) -> pd.DataFrame:
         raise HTTPException(status_code=404, detail=f"No trades file found: {exc}") from exc
 
     if f.variant is not None and f.variant.lower() not in ("all", ""):
-        df = df[df["strategy"] == f.variant]
+        variants = [v.strip() for v in f.variant.split(",") if v.strip()]
+        if variants:
+            df = df[df["strategy"].isin(variants)]
     if f.ticker is not None:
         df = df[df["ticker"].str.upper() == f.ticker.upper()]
     if f.price_min is not None:
@@ -319,6 +341,10 @@ def _apply_filters(f: AnalysisFilters) -> pd.DataFrame:
             h, m = map(int, f.time_to.split(":"))
             mask &= t_min <= h * 60 + m
         df = df[mask]
+    if f.date_from is not None:
+        df = df[df["entry_time"].dt.date >= pd.to_datetime(f.date_from).date()]
+    if f.date_to is not None:
+        df = df[df["entry_time"].dt.date <= pd.to_datetime(f.date_to).date()]
 
     if df.empty:
         raise HTTPException(status_code=422, detail="No trades match the given filters.")
@@ -328,8 +354,8 @@ def _apply_filters(f: AnalysisFilters) -> pd.DataFrame:
 
 
 def _build_equity(df: pd.DataFrame, f: AnalysisFilters):
-    from app.utils.trade_metrics import equity_from_r, equity_returns
-    equity_df = equity_from_r(df, initial_capital=f.initial_capital, risk_pct=f.risk_pct)
+    from app.utils.trade_metrics import equity_from_rr, equity_returns
+    equity_df = equity_from_rr(df, initial_capital=f.initial_capital, risk_pct=f.risk_pct)
     equity = equity_df["equity"]
     returns = equity_returns(equity)
     return equity, returns
@@ -425,6 +451,102 @@ async def get_drawdown(f: AnalysisFilters = Depends(_analysis_filters)):
         "days_count": len(points),
         "max_drawdown": round(float(dd.min()), 6),
         "series": points,
+    }
+
+
+@router.get("/stress-test", tags=["analysis"])
+async def get_stress_test(
+    top_pct: float = Query(default=5.0, ge=0.0, le=50.0, description="Top % of trades by PnL to remove"),
+    bins: int = Query(default=50, ge=5, le=200, description="Number of histogram bins"),
+    f: AnalysisFilters = Depends(_analysis_filters),
+):
+    """
+    Remove the best `top_pct`% of trades (sorted by pnl descending) and return
+    the resulting histogram + full summary, so you can see how dependent the
+    strategy is on its outlier winners.
+    """
+    from app.utils.trade_metrics import summary_report
+
+    df = _apply_filters(f)
+    original_count = len(df)
+
+    n_trim = max(1, int(np.ceil(original_count * top_pct / 100))) if top_pct > 0 else 0
+    df_trimmed = df.sort_values("pnl", ascending=False).iloc[n_trim:].copy()
+
+    _, returns = _build_equity(df_trimmed, f)
+
+    var_5 = float(returns.quantile(0.05)) if len(returns) else 0.0
+    counts, edges = np.histogram(returns.dropna(), bins=bins)
+    histogram = [
+        {"x": round(float(edges[i]), 6), "count": int(counts[i])}
+        for i in range(len(counts))
+    ]
+
+    try:
+        report = summary_report(df_trimmed, initial_capital=f.initial_capital, risk_pct=f.risk_pct)
+    except Exception:
+        report = {}
+
+    winners = int(df_trimmed["is_profit"].sum())
+    losers = len(df_trimmed) - winners
+
+    return {
+        "original_count": original_count,
+        "trimmed_count": n_trim,
+        "remaining_count": len(df_trimmed),
+        "top_pct": top_pct,
+        "var_5pct": round(var_5, 6),
+        "bins": len(histogram),
+        "histogram": histogram,
+        "trades_count": len(df_trimmed),
+        "winners": winners,
+        "losers": losers,
+        "summary": {k: _clean(v) for k, v in report.items()},
+    }
+
+
+@router.get("/stress-test/equity", tags=["analysis"])
+async def get_stress_test_equity(
+    top_pct: float = Query(default=5.0, ge=0.0, le=50.0, description="Top % of trades by PnL to remove"),
+    f: AnalysisFilters = Depends(_analysis_filters),
+):
+    """
+    Equity curve after removing the best `top_pct`% of trades (by pnl).
+    Same shape as /equity so the frontend can reuse the same chart component.
+    """
+    df = _apply_filters(f)
+    original_count = len(df)
+
+    n_trim = max(1, int(np.ceil(original_count * top_pct / 100))) if top_pct > 0 else 0
+    df_trimmed = df.sort_values("pnl", ascending=False).iloc[n_trim:].copy()
+
+    equity, _ = _build_equity(df_trimmed, f)
+    daily = equity.resample("D").last().dropna()
+
+    if len(daily) < 2:
+        return {"trades_count": len(df_trimmed), "days_count": 0, "curve": []}
+
+    years = (daily.index[-1] - daily.index[0]).days / 365.25
+    cagr = (daily.iloc[-1] / daily.iloc[0]) ** (1 / years) - 1
+    cagr_line = daily.iloc[0] * (1 + cagr) ** np.linspace(0, years, len(daily))
+
+    points = [
+        {
+            "time": t.date().isoformat(),
+            "equity": round(float(eq), 4),
+            "cagr_equity": round(float(cg), 4),
+        }
+        for t, eq, cg in zip(daily.index, daily, cagr_line)
+    ]
+    return {
+        "original_count": original_count,
+        "trimmed_count": n_trim,
+        "trades_count": len(df_trimmed),
+        "days_count": len(points),
+        "initial_capital": f.initial_capital,
+        "final_equity": round(float(daily.iloc[-1]), 4),
+        "cagr": round(cagr, 6),
+        "curve": points,
     }
 
 

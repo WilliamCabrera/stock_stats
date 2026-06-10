@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.utils.market_utils import append_single_parquet
 import strategies.vectorbt.small_caps  as sc 
+from app.utils.trade_metrics import get_mae_mfe
 
 
 def run_backtest(path="backtest_dataset", sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=True):
@@ -232,6 +233,11 @@ def run_backtest_incremental(timeframe="5m", strategy_fn=sc.backside_short_lower
             index += 1
             print(f'Processing backtest for {len(df_dict)} tickers at iteration {index}...')
             trades = strategy_fn(df_dict)
+            
+            # To compute MAE/MFE we need to concatenate all the ticker dataframes into one big dataframe
+            all_data = pd.concat(df_dict.values()).reset_index()
+            trades = get_mae_mfe(trades, all_data)
+            
             sc.save_trades_to_file(trades, file_path=str(output_file), append=append_trades)
             total_trades += len(trades)
             print(f'Trades generated in iteration {index}: {len(trades)}')
@@ -246,6 +252,11 @@ def run_backtest_incremental(timeframe="5m", strategy_fn=sc.backside_short_lower
         index += 1
         print(f'Processing backtest for {len(df_dict)} tickers at iteration {index}...')
         trades = strategy_fn(df_dict)
+        
+        # Calculate MAE/MFE for the final batch of trades before saving
+        all_data = pd.concat(df_dict.values()).reset_index()
+        trades = get_mae_mfe(trades, all_data)
+        
         sc.save_trades_to_file(trades, file_path=str(output_file), append=append_trades)
         total_trades += len(trades)
         print(f'Trades generated in iteration {index}: {len(trades)}')
@@ -268,9 +279,9 @@ def run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_
 
 def run_incremental_backtest_all_strategies():
 
-    run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest_incremental_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest_incremental_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=True)
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=True)
+    run_backtest_incremental_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=True)
 
     for tf in ("5m", "15m"):
         p = Path(f'backtest_dataset/pending_candles_{tf}.parquet')
@@ -308,15 +319,109 @@ def run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.backside_
 if __name__ == "__main__":
     
  
-    #pass
+    pass
 
-    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.backside_short_lower_low, append_trades=False)       
-    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.short_push_exhaustion, append_trades=False)       
-    # run_backtest_for_all_folds(sample_type="in_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
-    # run_backtest_for_all_folds(sample_type="out_of_sample", strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.backside_short_lower_low)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.backside_short_lower_low)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "backside_short_lower_low"
+    # )
     
-    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low, append_trades=False)
-    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.short_push_exhaustion, append_trades=False)
-    run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.gap_crap_strategy, append_trades=False)
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.short_push_exhaustion)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.short_push_exhaustion)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "short_push_exhaustion"
+    # )
+    
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.gap_crap_strategy)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.gap_crap_strategy)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "gap_crap_strategy"
+    # )
+    
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.orb_short)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.orb_short)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "orb_short"
+    # )
+    
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.backside_short_big_green)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.backside_short_big_green)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "backside_short_big_green"
+    # )
+    
+    #run_backtest_for_all_folds(sample_type="in_sample",strategy_fn=sc.backside_short_lower_low_fix_stop)
+    #run_backtest_for_all_folds(sample_type="out_of_sample",strategy_fn=sc.backside_short_lower_low_fix_stop)
+    # compute_mae_mfe_from_files_walkfordward(
+    #     base_path=DATASET_ROOT_WF,
+    #     strategy= "backside_short_lower_low_fix_stop"
+    # )
+
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "backside_short_lower_low" / "backside_short_lower_low_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "backside_short_lower_low" / "backside_short_lower_low_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.short_push_exhaustion)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "short_push_exhaustion" / "short_push_exhaustion_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "short_push_exhaustion" / "short_push_exhaustion_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.gap_crap_strategy)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "gap_crap_strategy" / "gap_crap_strategy_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "gap_crap_strategy" / "gap_crap_strategy_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.orb_short)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "orb_short" / "orb_short_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "orb_short" / "orb_short_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_big_green)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "backside_short_big_green" / "backside_short_big_green_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "backside_short_big_green" / "backside_short_big_green_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    #run_backtest_full_out_of_sample_all_timeframes(strategy_fn=sc.backside_short_lower_low_fix_stop)
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "15m" / "trades" / "backside_short_lower_low_fix_stop" / "backside_short_lower_low_fix_stop_full_15m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "15m" / "tickers"
+    # )
+    # compute_mae_mfe_from_files(
+    #     trades_path=DATASET_ROOT / "5m" / "trades" / "backside_short_lower_low_fix_stop" / "backside_short_lower_low_fix_stop_full_5m_trades.parquet",
+    #     tickers_folder=DATASET_ROOT / "5m" / "tickers"
+    # )
+    
+    

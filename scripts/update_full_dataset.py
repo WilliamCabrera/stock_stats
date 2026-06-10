@@ -300,39 +300,6 @@ def _upsert_pending_candles(new_df: pd.DataFrame, timeframe: str) -> None:
 # Step 6 — pending backtest queue
 # ---------------------------------------------------------------------------
 
-def _upsert_pending_backtest(new_rows: pd.DataFrame) -> None:
-    """
-    Upsert stock_data_filtered rows into pending_backtest.parquet.
-
-    The file acts as a queue for the backtest pipeline: each row is one
-    ticker-day that needs to be run through every strategy.  Rows are keyed
-    by (ticker, date_str); re-running the update pipeline for the same dates
-    is safe — existing rows are replaced rather than duplicated.
-
-    Columns: all columns returned by stock_data_filtered (ticker, date_str,
-    gap, gap_perc, previous_close, open, high, low, close, volume, …).
-    """
-    if new_rows.empty:
-        return
-
-    path = PENDING_BACKTEST_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if path.exists():
-        existing = pd.read_parquet(path)
-        key      = set(zip(new_rows["ticker"], new_rows["date_str"]))
-        existing = existing[
-            ~existing.apply(lambda r: (r["ticker"], r["date_str"]) in key, axis=1)
-        ]
-        new_rows = pd.concat([existing, new_rows], ignore_index=True)
-
-    new_rows = new_rows.sort_values(["date_str", "ticker"]).reset_index(drop=True)
-    new_rows.to_parquet(path, index=False, compression="zstd")
-    logger.info(
-        "pending_backtest: %d rows queued → %d total  (%s)",
-        len(new_rows), len(new_rows), path,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -408,8 +375,7 @@ def run(dry_run: bool = False) -> None:
         new_df = pd.concat(parts, ignore_index=True).sort_values(["ticker", "date"])
         _upsert_full_dataset(new_df, tf)
 
-    # Step 6 — queue new ticker-days for the backtest pipeline
-    _upsert_pending_backtest(filtered_df)
+   
 
     logger.info("Update complete.")
 

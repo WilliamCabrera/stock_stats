@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.api.routes import router
 from app.api.debug_routes import router as debug_router
 from app.api.smallcaps_routes import router as smallcaps_router
+from app.api.wf_routes import router as wf_router
 from app.utils.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(router, prefix="/api/v1")
+    app.include_router(wf_router, prefix="/api/v1")
     app.include_router(debug_router, prefix="/api/v1")
     app.include_router(smallcaps_router, prefix="/api/v1")
 

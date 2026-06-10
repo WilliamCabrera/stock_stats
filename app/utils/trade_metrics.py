@@ -1,6 +1,7 @@
 import os
 import tempfile
 import webbrowser
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -223,35 +224,88 @@ def r_multiple(trades: pd.DataFrame) -> pd.Series:
 # ============================================================
 
 
-def equity_from_r(trades: pd.DataFrame, initial_capital: float, risk_pct: float) -> pd.DataFrame:
+def equity_from_r(trades: pd.DataFrame, initial_capital: float, risk_pct: float, min_volume:float = 40000) -> pd.DataFrame:
     """
     Construye la curva de equity usando R y un % fijo de la cuenta por trade.
     Devuelve un DataFrame con índice exit_time y columnas equity + entry_time
     risk_pct: entre 0 y 1, ex: 50% = 0.5
     """
     trades = trades.copy().sort_values("exit_time")
+    trades = trades[trades['volume'] >= min_volume].reset_index(drop=True)
     trades["R"] = r_multiple(trades)
-    #print("******** equity_from_r ********")
-    #print(trades[['entry_time','entry_price','exit_price','stop_loss_price','R']])
+    # print("******** equity_from_r ********")
+    # positive_r = trades[trades["R"] > 0]
+    # negative_r = trades[trades["R"] < 0]
+    # print(positive_r[['ticker','entry_time','entry_price','exit_price','stop_loss_price','R','Return']])
+    # print(negative_r[['ticker','entry_time','entry_price','exit_price','stop_loss_price','R', 'Return']])
     
 
     capital = initial_capital
+    capital_v1 = capital 
     equity = []
+    equity_1 = []
 
-    for r in trades["R"]:
-        pnl = capital * risk_pct * r
+    for _, row in trades.iterrows():
+        
+        return_pnl = row["pnl"] 
+        risk_per_share = abs(row["entry_price"] - row["stop_loss_price"])
+        dollar_risk = capital * risk_pct
+        shares_wanted = dollar_risk / risk_per_share if risk_per_share > 0 else 0
+        shares_actual = int(min(shares_wanted, row["volume"] * 0.1))  # Limitar a un % del volumen para evitar problemas de liquidez
+        actual_dollar_risk =  shares_actual * risk_per_share
+        commission =  shares_actual * 0.005 if shares_actual > 200 else 0.495 * 2
+        notional = shares_actual * row["entry_price"]
+        locates_fees = notional * 0.01 if row["type"].lower() == "short" else 0
+        pnl = (shares_actual * return_pnl) - locates_fees - (0.005 * 2 * shares_actual)
         capital += pnl
         equity.append(capital)
-        #print(f' === {pnl}, {capital}, {risk_pct}, {r}')
-        
+       
+       
 
     equity_df = pd.DataFrame({
         "equity": equity,
         "entry_time": trades["entry_time"].values
     }, index=trades["exit_time"])
     
+   
+    print(equity_df)
+   
+    print("******** equity_from_r with realistic position sizing ********")
+   
+    print(trades[['ticker','entry_time','entry_price','exit_price','stop_loss_price','R', 'Return','pnl']])
 
- 
+    
+
+    return equity_df
+
+
+def equity_from_rr(trades: pd.DataFrame, initial_capital: float, risk_pct: float) -> pd.DataFrame:
+    """
+    Construye la curva de equity escalando el position size según risk_reward_ratio.
+
+    Por cada trade:
+      dollar_risk = capital * risk_pct * risk_reward_ratio
+      shares      = dollar_risk / entry_price
+      trade_pnl   = shares * pnl  (pnl es por 1 share en el dataframe)
+
+    risk_pct: entre 0 y 1, ej: 2% = 0.02
+    """
+    trades = trades.copy().sort_values("exit_time")
+
+    capital = initial_capital
+    equity = []
+
+    for _, row in trades.iterrows():
+        dollar_risk = capital * risk_pct * row["risk_reward_ratio"]
+        shares = dollar_risk / row["entry_price"]
+        trade_pnl = shares * row["pnl"]
+        capital += trade_pnl
+        equity.append(capital)
+
+    equity_df = pd.DataFrame({
+        "equity": equity,
+        "entry_time": trades["entry_time"].values
+    }, index=trades["exit_time"])
 
     return equity_df
 
@@ -267,7 +321,7 @@ def cumulative_returns(equity: pd.Series) -> float:
 
 
 def annual_return(equity: pd.Series, start_date: pd.Timestamp, end_date: pd.Timestamp) -> float:
-    
+
     years = (end_date - start_date).days / 365.25
     print('********* annual_return ********')
     #print(years)
@@ -591,8 +645,8 @@ def analysis_and_plot(trades: pd.DataFrame, initial_capital: float, risk_pct: fl
     # ============================================================
     # Crear layout 2x2 con gridspec
     # ============================================================
-    fig = plt.figure(figsize=(16, 12))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1])
+    fig = plt.figure(figsize=(24, 22))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 0.8, 0.8])
 
     # ----------------------------
     # 1️⃣ Equity Curve
@@ -638,6 +692,59 @@ def analysis_and_plot(trades: pd.DataFrame, initial_capital: float, risk_pct: fl
     ax3.set_title('Distribución de Retornos Diarios')
     ax3.grid(True)
     ax3.legend()
+
+    # ----------------------------
+    # 5️⃣ Trade scatter (winners / losers)
+    # ----------------------------
+    ax4 = fig.add_subplot(gs[2, 0])
+    trade_returns = trades["Return"].reset_index(drop=True)
+    winners_idx = trade_returns[trade_returns > 0].index
+    losers_idx  = trade_returns[trade_returns <= 0].index
+    ax4.axhline(0, color="white", linewidth=1.2, zorder=1)
+    ax4.scatter(winners_idx, trade_returns[winners_idx] * 100, color="green", s=18, alpha=0.7, zorder=2, label="Winners")
+    ax4.scatter(losers_idx,  trade_returns[losers_idx]  * 100, color="red",   s=18, alpha=0.7, zorder=2, label="Losers")
+    ax4.set_xlabel("Trade #")
+    ax4.set_ylabel("Return (%)")
+    ax4.set_title("Trade-by-Trade Returns")
+    ax4.legend()
+    ax4.grid(True)
+
+    # ----------------------------
+    # 6️⃣ MAE scatter — winners arriba (Return), MAE abajo (negativo)
+    # ----------------------------
+    ax5 = fig.add_subplot(gs[2, 1])
+    mae = trades["MAE"].reset_index(drop=True)
+    ax5.axhline(0, color="white", linewidth=1.2, zorder=1)
+    for i in winners_idx:
+        ax5.plot([i, i], [trade_returns[i] * 100, -abs(mae[i]) * 100], color="gray", linewidth=0.5, alpha=0.4, zorder=1)
+    ax5.scatter(winners_idx, trade_returns[winners_idx] * 100,   color="green", s=18, alpha=0.8, zorder=2, label="Winner Return")
+    ax5.scatter(winners_idx, -abs(mae[winners_idx]) * 100,       color="red",   s=18, alpha=0.8, zorder=2, label="MAE")
+    ax5.set_xlabel("Trade # (winners)")
+    ax5.set_ylabel("(%)")
+    ax5.set_title("Winners: Return vs MAE")
+    ax5.legend()
+    ax5.grid(True)
+
+    # ----------------------------
+    # 7️⃣ Histograma MAE por rangos
+    # ----------------------------
+    ax6 = fig.add_subplot(gs[3, :])
+    mae_all = abs(trades["MAE"].reset_index(drop=True)) * 100
+    max_mae = max(mae_all.max(), 100)
+    bins = [0, 25, 50] + list(range(60, int(max_mae) + 10, 10))
+    counts, edges = np.histogram(mae_all, bins=bins)
+    labels = [f"{int(edges[i])}-{int(edges[i+1])}" for i in range(len(edges) - 1)]
+    bar_colors = ["steelblue"] * len(counts)
+    ax6.bar(range(len(counts)), counts, color=bar_colors, edgecolor="black", alpha=0.8)
+    ax6.set_xticks(range(len(counts)))
+    ax6.set_xticklabels(labels, rotation=45, ha="right")
+    ax6.set_xlabel("MAE (%)")
+    ax6.set_ylabel("Número de trades")
+    ax6.set_title("Distribución de MAE por rangos")
+    for i, c in enumerate(counts):
+        if c > 0:
+            ax6.text(i, c + 0.3, str(c), ha="center", va="bottom", fontsize=8)
+    ax6.grid(axis="y", alpha=0.4)
 
     plt.tight_layout()
     tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -762,7 +869,7 @@ def analysis_and_plot_with_benchmark(
     plt.show()
     
 def get_mae_mfe(trades, data):
-    trades = trades[:5]
+   
     trades_data = trades.copy()
     # Asegurar datetime
     trades_data['entry_time'] = pd.to_datetime(trades_data['entry_time'])
@@ -796,22 +903,181 @@ def get_mae_mfe(trades, data):
         lowest_low = trade_data['low'].min()
 
         if side.lower() == "long":
-            mae = lowest_low - entry_price
-            mfe = highest_high - entry_price
+            mae = (lowest_low - entry_price)/entry_price
+            mfe = (highest_high - entry_price)/entry_price
         else:  # short
-            mae = entry_price - highest_high
-            mfe = entry_price - lowest_low
+            mae = (entry_price - highest_high)/entry_price
+            mfe = (entry_price - lowest_low)/entry_price
 
         mae_list.append(mae)
         mfe_list.append(mfe)
 
     trades_data['MAE'] = mae_list
     trades_data['MFE'] = mfe_list
-        
+
 
     return trades_data
 
 
+def compute_mae_mfe_from_files(trades_path, tickers_folder):
+    """
+    Lee el parquet de trades desde trades_path, calcula MAE y MFE para cada trade
+    cargando los datos OHLCV de tickers_folder, y guarda el resultado en un nuevo
+    parquet con el sufijo _MAE_MFE en el mismo directorio.
+
+    trades_path: ruta al fichero .parquet de trades
+    tickers_folder: ruta a la carpeta con los archivos .parquet por ticker
+    """
+    trades_path = Path(trades_path)
+    output_path = trades_path.parent / f"{trades_path.stem}_MAE_MFE.parquet"
+
+    trades_data = pd.read_parquet(trades_path)
+    #trades_data = trades_data[:5]
+    trades_data['entry_time'] = pd.to_datetime(trades_data['entry_time'])
+    trades_data['exit_time'] = pd.to_datetime(trades_data['exit_time'])
+
+    mae_list = [None] * len(trades_data)
+    mfe_list = [None] * len(trades_data)
+
+    tickers_folder = Path(tickers_folder)
+
+    for ticker, group in trades_data.groupby('ticker'):
+        parquet_path = tickers_folder / f"{ticker}.parquet"
+
+        if not parquet_path.exists():
+            print(f"[WARN] No parquet found for {ticker}, skipping.")
+            continue
+
+        print(f"Processing {ticker} with {len(group)} trades...")
+        ticker_data = pd.read_parquet(parquet_path)
+        ticker_data['date'] = pd.to_datetime(ticker_data['date'])
+
+        for idx in group.index:
+            row = trades_data.loc[idx]
+            entry_time = row['entry_time']
+            exit_time = row['exit_time']
+            entry_price = row['entry_price']
+            side = row['type']
+
+            trade_data = ticker_data[
+                (ticker_data['date'] >= entry_time) &
+                (ticker_data['date'] <= exit_time)
+            ]
+
+            if trade_data.empty:
+                continue
+
+            highest_high = trade_data['high'].max()
+            lowest_low = trade_data['low'].min()
+
+            if side.lower() == "long":
+                mae = (lowest_low - entry_price)/entry_price
+                mfe = (highest_high - entry_price)/entry_price
+            else:  # short
+                mae = (entry_price - highest_high)/entry_price
+                mfe = (entry_price - lowest_low)/entry_price
+
+            mae_list[trades_data.index.get_loc(idx)] = mae
+            mfe_list[trades_data.index.get_loc(idx)] = mfe
+
+    trades_data['MAE'] = mae_list
+    trades_data['MFE'] = mfe_list
+    
+   
+    #print(trades_data[['ticker', 'entry_price', 'exit_price', 'stop_loss_price', 'previous_day_close','entry_time','Return','MAE','MFE']])
+
+
+    trades_data.to_parquet(output_path, index=False)
+    print(f"Saved {len(trades_data)} trades to {output_path}")
+
+    return trades_data
+
+def compute_mae_mfe_from_files_walkfordward(base_path, strategy):
+    """
+    Lee el parquet de trades desde trades_path, calcula MAE y MFE para cada trade
+    cargando los datos OHLCV de tickers_folder, y guarda el resultado en un nuevo
+    parquet con el sufijo _MAE_MFE en el mismo directorio.
+
+    trades_path: ruta al fichero .parquet de trades
+    tickers_folder: ruta a la carpeta con los archivos .parquet por ticker
+    """
+    timeframe = ['5m', '15m']
+    folds = ['fold_1', 'fold_2', 'fold_3']
+    is_oos = ['in_sample', 'out_of_sample']
+    
+    for tf in timeframe:
+        
+        for fold in folds:
+            
+            for is_oos_item in is_oos:
+            
+                print(f"Processing {fold}...")
+                
+                
+                trades_path = Path(base_path / tf / fold / "trades" / strategy / f"{strategy}_{is_oos_item}_trades.parquet")
+                output_path = trades_path.parent / f"{trades_path.stem}_MAE_MFE.parquet"
+
+                trades_data = pd.read_parquet(trades_path)
+                #trades_data = trades_data[:5]
+                trades_data['entry_time'] = pd.to_datetime(trades_data['entry_time'])
+                trades_data['exit_time'] = pd.to_datetime(trades_data['exit_time'])
+
+                mae_list = [None] * len(trades_data)
+                mfe_list = [None] * len(trades_data)
+                
+                parquet_path = base_path / tf / fold / f"{is_oos_item}.parquet"
+
+                if not parquet_path.exists():
+                    print(f"[WARN] No parquet found for {parquet_path}, skipping.")
+                    continue    
+            
+                tickers_data = pd.read_parquet(parquet_path)
+                
+
+                for ticker, group in trades_data.groupby('ticker'):
+                    
+                    ticker_data = tickers_data[tickers_data['ticker'] == ticker]
+                    ticker_data['date'] = pd.to_datetime(ticker_data['date'])
+
+                    for idx in group.index:
+                        row = trades_data.loc[idx]
+                        entry_time = row['entry_time']
+                        exit_time = row['exit_time']
+                        entry_price = row['entry_price']
+                        side = row['type']
+
+                        trade_data = ticker_data[
+                            (ticker_data['date'] >= entry_time) &
+                            (ticker_data['date'] <= exit_time)
+                        ]
+
+                        if trade_data.empty:
+                            continue
+
+                        highest_high = trade_data['high'].max()
+                        lowest_low = trade_data['low'].min()
+
+                        if side.lower() == "long":
+                            mae = (lowest_low - entry_price)/entry_price
+                            mfe = (highest_high - entry_price)/entry_price
+                        else:  # short
+                            mae = (entry_price - highest_high)/entry_price
+                            mfe = (entry_price - lowest_low)/entry_price
+
+                        mae_list[trades_data.index.get_loc(idx)] = mae
+                        mfe_list[trades_data.index.get_loc(idx)] = mfe
+
+                trades_data['MAE'] = mae_list
+                trades_data['MFE'] = mfe_list
+                
+            
+                #print(trades_data[['ticker', 'entry_price', 'exit_price', 'stop_loss_price', 'previous_day_close','entry_time','Return','MAE','MFE']])
+
+
+                trades_data.to_parquet(output_path, index=False)
+                print(f"Saved {len(trades_data)} trades to {output_path}")
+
+    
 # ===========================
 # MONTECARLO SIMALATION
 #============================

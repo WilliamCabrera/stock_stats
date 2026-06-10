@@ -3,7 +3,7 @@ WORKERS ?= 1
 PROCS   ?= 4
 CONCUR  ?= 10
 
-.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts reload-scheduler
+.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts reload-scheduler dashboard
 
 ## Build all images (no cache)
 build:
@@ -90,6 +90,13 @@ pipeline-data-collection:
 pipeline-delisted:
 	docker exec -it backtester_api-api-1 python3 app/utils/pipeline_delisted.py
 
+
+## Launch backtest dashboard  →  make dashboard
+## Optional: make dashboard STRAT=strategies/iterative/OOS/5m PORT=8502
+STRAT ?= strategies
+PORT  ?= 8501
+dashboard:
+	.venv/bin/streamlit run $(STRAT)/dashboard.py --server.port $(PORT)
 
 ## Delete temporary chart HTML files from /tmp
 ## Use  make clean-charts FORCE=1  to skip confirmation

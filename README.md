@@ -68,6 +68,43 @@ python scripts/split_dataset_by_ticker.py --timeframe 15m
 
 ---
 
+### `scripts/split_dataset_by_date.py`
+Splits `full_dataset.parquet` into one `.parquet` file per trading date. Used by the iterative backtest engine (`run_backtest`) to read data day by day.
+
+Output: `backtest_dataset/full/{timeframe}/dates/{YYYY_MM_DD}.parquet`
+
+```bash
+# Both timeframes (5m and 15m)
+python -m scripts.split_dataset_by_date
+
+# Single timeframe
+python -m scripts.split_dataset_by_date --timeframe 5m
+python -m scripts.split_dataset_by_date --timeframe 15m
+```
+
+---
+
+### `scripts/split_walkforward_by_date.py`
+Splits each fold's `in_sample.parquet` and `out_of_sample.parquet` into one `.parquet` file per trading date.
+
+Output:
+- `backtest_dataset/walkforward/{timeframe}/fold_{n}/dates_IS/{YYYY_MM_DD}.parquet`
+- `backtest_dataset/walkforward/{timeframe}/fold_{n}/dates_OOS/{YYYY_MM_DD}.parquet`
+
+```bash
+# All timeframes and all folds
+python -m scripts.split_walkforward_by_date
+
+# Single timeframe
+python -m scripts.split_walkforward_by_date --timeframe 5m
+python -m scripts.split_walkforward_by_date --timeframe 15m
+
+# Single fold
+python -m scripts.split_walkforward_by_date --timeframe 5m --fold 2
+```
+
+---
+
 ### `scripts/plot_trade.py`
 Plots a single trade from a trades parquet file with candles and entry/exit markers.
 

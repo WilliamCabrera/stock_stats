@@ -825,7 +825,7 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📊 Equity & Drawdown",
     "💸 Comisiones",
     "📅 Por Período",
@@ -834,6 +834,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🏷️ Por Ticker",
     "📋 Trades",
     "🎲 Montecarlo",
+    "⚖️ Comparar",
 ])
 
 # ── TAB 1: Equity + Drawdown ──────────────────────────────────────────────────
@@ -1683,166 +1684,323 @@ with tab8:
 
     if "mc_equity" not in st.session_state:
         st.info("👆 Pulsa **Ejecutar nueva simulación** para comenzar.")
-        st.stop()
+        _mc_ready = False
+    else:
+        _mc_ready = True
 
-    mc_equity   = st.session_state["mc_equity"]
-    _ruin_level = st.session_state["mc_ruin_level"]
-    _ruin_thr   = st.session_state["mc_ruin_thr"]
-    _n_sims     = st.session_state["mc_n_sims"]
+    if _mc_ready:
+        mc_equity   = st.session_state["mc_equity"]
+        _ruin_level = st.session_state["mc_ruin_level"]
+        _ruin_thr   = st.session_state["mc_ruin_thr"]
+        _n_sims     = st.session_state["mc_n_sims"]
 
-    # ── Percentiles ───────────────────────────────────────────────────────────
-    p05 = np.percentile(mc_equity, 5,  axis=0)
-    p25 = np.percentile(mc_equity, 25, axis=0)
-    p50 = np.percentile(mc_equity, 50, axis=0)
-    p75 = np.percentile(mc_equity, 75, axis=0)
-    p95 = np.percentile(mc_equity, 95, axis=0)
+        p05 = np.percentile(mc_equity, 5,  axis=0)
+        p25 = np.percentile(mc_equity, 25, axis=0)
+        p50 = np.percentile(mc_equity, 50, axis=0)
+        p75 = np.percentile(mc_equity, 75, axis=0)
+        p95 = np.percentile(mc_equity, 95, axis=0)
 
-    # Real equity curve (trade-indexed, not time-indexed for fair comparison)
-    actual_equity = df["equity_curve"].values
-    x_axis        = np.arange(1, n_trades + 1)
+        actual_equity  = df["equity_curve"].values
+        x_axis         = np.arange(1, n_trades + 1)
+        final_equities = mc_equity[:, -1]
+        actual_final   = actual_equity[-1]
+        rank_pct       = (final_equities < actual_final).mean() * 100
+        hit_ruin       = (mc_equity.min(axis=1) <= _ruin_level).mean() * 100
 
-    # Final equity of each simulation
-    final_equities = mc_equity[:, -1]
-    actual_final   = actual_equity[-1]
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Simulaciones",         f"{_n_sims:,}")
+        k2.metric("Equity real final",    fmt_dollar(actual_final))
+        k3.metric("Percentil real",       f"{rank_pct:.1f}º",
+                  help="La curva real supera al X% de las simulaciones en equity final")
+        k4.metric("Mediana simulaciones", fmt_dollar(np.median(final_equities)))
+        k5.metric("Riesgo de Ruina",      f"{hit_ruin:.1f}%",
+                  delta=f"umbral -{_ruin_thr}% (${_ruin_level:,.0f})",
+                  delta_color="inverse" if hit_ruin > 5 else "off")
+        k6.metric("P5 equity final",      fmt_dollar(np.percentile(final_equities, 5)))
 
-    # Percentile rank of actual curve
-    rank_pct = (final_equities < actual_final).mean() * 100
-
-    # Risk of Ruin: % of paths that touch the ruin level at any point
-    hit_ruin = (mc_equity.min(axis=1) <= _ruin_level).mean() * 100
-
-    # ── KPI row ───────────────────────────────────────────────────────────────
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Simulaciones",          f"{_n_sims:,}")
-    k2.metric("Equity real final",     fmt_dollar(actual_final))
-    k3.metric("Percentil real",        f"{rank_pct:.1f}º",
-              help="La curva real supera al X% de las simulaciones en equity final")
-    k4.metric("Mediana simulaciones",  fmt_dollar(np.median(final_equities)))
-    k5.metric("Riesgo de Ruina",       f"{hit_ruin:.1f}%",
-              delta=f"umbral -{_ruin_thr}% (${_ruin_level:,.0f})",
-              delta_color="inverse" if hit_ruin > 5 else "off")
-    k6.metric("P5 equity final",       fmt_dollar(np.percentile(final_equities, 5)))
-
-    st.divider()
-
-    # ── Chart 1: Equity paths + percentile bands ──────────────────────────────
-    fig_mc = go.Figure()
-
-    # Individual paths (subsample for display performance)
-    show_n  = min(show_paths, _n_sims)
-    indices = np.random.choice(_n_sims, size=show_n, replace=False)
-    for i in indices:
-        fig_mc.add_trace(go.Scatter(
-            x=x_axis, y=mc_equity[i],
-            mode="lines",
-            line=dict(color="rgba(144,164,174,0.08)", width=1),
-            showlegend=False, hoverinfo="skip",
-        ))
-
-    # Percentile bands
-    fig_mc.add_trace(go.Scatter(
-        x=np.concatenate([x_axis, x_axis[::-1]]),
-        y=np.concatenate([p95, p05[::-1]]),
-        fill="toself", fillcolor="rgba(66,165,245,0.08)",
-        line=dict(color="rgba(0,0,0,0)"), name="P5–P95",
-        hoverinfo="skip",
-    ))
-    fig_mc.add_trace(go.Scatter(
-        x=np.concatenate([x_axis, x_axis[::-1]]),
-        y=np.concatenate([p75, p25[::-1]]),
-        fill="toself", fillcolor="rgba(66,165,245,0.18)",
-        line=dict(color="rgba(0,0,0,0)"), name="P25–P75",
-        hoverinfo="skip",
-    ))
-    # Percentile lines
-    for arr, label, color, dash in [
-        (p95, "P95", "#42a5f5", "dot"),
-        (p75, "P75", "#42a5f5", "dash"),
-        (p50, "Mediana", "#ffca28", "solid"),
-        (p25, "P25",  "#ef5350", "dash"),
-        (p05, "P05",  "#ef5350", "dot"),
-    ]:
-        fig_mc.add_trace(go.Scatter(
-            x=x_axis, y=arr, mode="lines", name=label,
-            line=dict(color=color, width=1.2, dash=dash),
-        ))
-
-    # Actual equity curve
-    fig_mc.add_trace(go.Scatter(
-        x=x_axis, y=actual_equity,
-        mode="lines", name=f"Curva real (P{rank_pct:.0f})",
-        line=dict(color="#26a69a", width=2.5),
-    ))
-
-    # Reference lines
-    fig_mc.add_hline(y=initial_capital, line_dash="dot",
-                     line_color=SUB, opacity=0.5, annotation_text="Capital inicial")
-    fig_mc.add_hline(y=_ruin_level, line_dash="dash",
-                     line_color=RED, opacity=0.7,
-                     annotation_text=f"Ruina (-{_ruin_thr}%)")
-
-    fig_mc.update_layout(
-        **PLOTLY_LAYOUT, height=500,
-        title=f"Montecarlo — {_n_sims:,} simulaciones · Curva real en percentil {rank_pct:.1f}",
-        xaxis_title="Trade #",
-        yaxis_title="Equity ($)",
-    )
-    st.plotly_chart(fig_mc, use_container_width=True)
-
-    # ── Chart 2: Final equity distribution ────────────────────────────────────
-    col_dist, col_ruin = st.columns([2, 1])
-
-    with col_dist:
-        fig_dist = go.Figure()
-        fig_dist.add_trace(go.Histogram(
-            x=final_equities, nbinsx=80,
-            marker_color=BLUE, opacity=0.75, name="Equity final",
-        ))
-        fig_dist.add_vline(x=actual_final,    line_color=GREEN, line_width=2,
-                           annotation_text=f"Real ${actual_final:,.0f}",
-                           annotation_font_color=GREEN)
-        fig_dist.add_vline(x=np.median(final_equities), line_color=YELLOW,
-                           line_dash="dash", line_width=1.5,
-                           annotation_text=f"Mediana ${np.median(final_equities):,.0f}",
-                           annotation_font_color=YELLOW)
-        fig_dist.add_vline(x=initial_capital, line_color=SUB,
-                           line_dash="dot", line_width=1,
-                           annotation_text="Capital inicial")
-        fig_dist.add_vline(x=_ruin_level, line_color=RED,
-                           line_dash="dash", line_width=1.5,
-                           annotation_text=f"Ruina ${_ruin_level:,.0f}",
-                           annotation_font_color=RED)
-        fig_dist.update_layout(
-            **PLOTLY_LAYOUT, height=340,
-            title="Distribución de equity final (todas las simulaciones)",
-            xaxis_title="Equity final ($)", yaxis_title="Frecuencia",
-        )
-        st.plotly_chart(fig_dist, use_container_width=True)
-
-    with col_ruin:
-        st.markdown("#### 💀 Riesgo de Ruina")
-        ror_color = RED if hit_ruin > 10 else (YELLOW if hit_ruin > 3 else GREEN)
-        st.markdown(
-            f"<h1 style='color:{ror_color};text-align:center;margin:0'>"
-            f"{hit_ruin:.1f}%</h1>"
-            f"<p style='text-align:center;color:{SUB};margin:4px 0'>"
-            f"de {_n_sims:,} paths tocan la ruina<br>"
-            f"(equity &lt; ${_ruin_level:,.0f})</p>",
-            unsafe_allow_html=True,
-        )
         st.divider()
-        st.markdown("**Percentiles de equity final:**")
-        for p_val, p_label in [(5,"P5"),(10,"P10"),(25,"P25"),(50,"P50"),(75,"P75"),(90,"P90"),(95,"P95")]:
-            val = np.percentile(final_equities, p_val)
-            ret = (val - initial_capital) / initial_capital * 100
-            color = GREEN if val >= initial_capital else RED
+
+        fig_mc  = go.Figure()
+        show_n  = min(show_paths, _n_sims)
+        indices = np.random.choice(_n_sims, size=show_n, replace=False)
+        for i in indices:
+            fig_mc.add_trace(go.Scatter(
+                x=x_axis, y=mc_equity[i], mode="lines",
+                line=dict(color="rgba(144,164,174,0.08)", width=1),
+                showlegend=False, hoverinfo="skip",
+            ))
+        fig_mc.add_trace(go.Scatter(
+            x=np.concatenate([x_axis, x_axis[::-1]]),
+            y=np.concatenate([p95, p05[::-1]]),
+            fill="toself", fillcolor="rgba(66,165,245,0.08)",
+            line=dict(color="rgba(0,0,0,0)"), name="P5–P95", hoverinfo="skip",
+        ))
+        fig_mc.add_trace(go.Scatter(
+            x=np.concatenate([x_axis, x_axis[::-1]]),
+            y=np.concatenate([p75, p25[::-1]]),
+            fill="toself", fillcolor="rgba(66,165,245,0.18)",
+            line=dict(color="rgba(0,0,0,0)"), name="P25–P75", hoverinfo="skip",
+        ))
+        for arr, label, color, dash in [
+            (p95,"P95","#42a5f5","dot"),(p75,"P75","#42a5f5","dash"),
+            (p50,"Mediana","#ffca28","solid"),
+            (p25,"P25","#ef5350","dash"),(p05,"P05","#ef5350","dot"),
+        ]:
+            fig_mc.add_trace(go.Scatter(
+                x=x_axis, y=arr, mode="lines", name=label,
+                line=dict(color=color, width=1.2, dash=dash),
+            ))
+        fig_mc.add_trace(go.Scatter(
+            x=x_axis, y=actual_equity,
+            mode="lines", name=f"Curva real (P{rank_pct:.0f})",
+            line=dict(color="#26a69a", width=2.5),
+        ))
+        fig_mc.add_hline(y=initial_capital, line_dash="dot",
+                         line_color=SUB, opacity=0.5, annotation_text="Capital inicial")
+        fig_mc.add_hline(y=_ruin_level, line_dash="dash", line_color=RED, opacity=0.7,
+                         annotation_text=f"Ruina (-{_ruin_thr}%)")
+        fig_mc.update_layout(
+            **PLOTLY_LAYOUT, height=500,
+            title=f"Montecarlo — {_n_sims:,} simulaciones · Curva real en percentil {rank_pct:.1f}",
+            xaxis_title="Trade #", yaxis_title="Equity ($)",
+        )
+        st.plotly_chart(fig_mc, use_container_width=True)
+
+        col_dist, col_ruin = st.columns([2, 1])
+        with col_dist:
+            fig_dist = go.Figure()
+            fig_dist.add_trace(go.Histogram(
+                x=final_equities, nbinsx=80,
+                marker_color=BLUE, opacity=0.75, name="Equity final",
+            ))
+            fig_dist.add_vline(x=actual_final, line_color=GREEN, line_width=2,
+                               annotation_text=f"Real ${actual_final:,.0f}",
+                               annotation_font_color=GREEN)
+            fig_dist.add_vline(x=np.median(final_equities), line_color=YELLOW,
+                               line_dash="dash", line_width=1.5,
+                               annotation_text=f"Mediana ${np.median(final_equities):,.0f}",
+                               annotation_font_color=YELLOW)
+            fig_dist.add_vline(x=initial_capital, line_color=SUB, line_dash="dot",
+                               annotation_text="Capital inicial")
+            fig_dist.add_vline(x=_ruin_level, line_color=RED, line_dash="dash",
+                               annotation_text=f"Ruina ${_ruin_level:,.0f}",
+                               annotation_font_color=RED)
+            fig_dist.update_layout(
+                **PLOTLY_LAYOUT, height=340,
+                title="Distribución de equity final",
+                xaxis_title="Equity final ($)", yaxis_title="Frecuencia",
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+        with col_ruin:
+            st.markdown("#### 💀 Riesgo de Ruina")
+            ror_color = RED if hit_ruin > 10 else (YELLOW if hit_ruin > 3 else GREEN)
             st.markdown(
-                f"`{p_label}` &nbsp; <span style='color:{color}'>"
-                f"**${val:,.0f}** ({ret:+.1f}%)</span>",
+                f"<h1 style='color:{ror_color};text-align:center;margin:0'>"
+                f"{hit_ruin:.1f}%</h1>"
+                f"<p style='text-align:center;color:{SUB};margin:4px 0'>"
+                f"de {_n_sims:,} paths tocan la ruina<br>"
+                f"(equity &lt; ${_ruin_level:,.0f})</p>",
                 unsafe_allow_html=True,
             )
+            st.divider()
+            st.markdown("**Percentiles de equity final:**")
+            for p_val, p_label in [(5,"P5"),(10,"P10"),(25,"P25"),(50,"P50"),
+                                    (75,"P75"),(90,"P90"),(95,"P95")]:
+                val   = np.percentile(final_equities, p_val)
+                ret   = (val - initial_capital) / initial_capital * 100
+                color = GREEN if val >= initial_capital else RED
+                st.markdown(
+                    f"`{p_label}` &nbsp; <span style='color:{color}'>"
+                    f"**${val:,.0f}** ({ret:+.1f}%)</span>",
+                    unsafe_allow_html=True,
+                )
+            st.divider()
+            st.metric("Paths rentables",    f"{(final_equities > initial_capital).mean()*100:.1f}%")
+            st.metric("Paths > curva real", f"{(final_equities > actual_final).mean()*100:.1f}%")
+
+
+# ── TAB 9: Comparar estrategias ───────────────────────────────────────────────
+with tab9:
+    COMP_COLORS = [
+        "#26a69a","#42a5f5","#ffca28","#ab47bc",
+        "#ff7043","#66bb6a","#26c6da","#ec407a",
+    ]
+
+    st.markdown("### ⚖️ Comparador de Estrategias")
+    _comm_badge = "✅ ON" if include_commissions else "❌ OFF"
+    st.caption(
+        f"Capital **${initial_capital:,}** · Riesgo **{risk_pct}%** · "
+        f"Comisiones **{_comm_badge}** · Modo **{'Compuesto' if compound else 'Fijo'}** · "
+        f"RVOL mín **{rvol_min}x** · Vol entrada mín **{entry_vol_min:,}**  "
+        f"— todos los filtros del sidebar se aplican a cada estrategia."
+    )
+
+    if "comp_strategies" not in st.session_state:
+        st.session_state.comp_strategies = []
+
+    up_col1, up_col2 = st.columns([3, 1])
+    with up_col1:
+        new_file = st.file_uploader(
+            "Añadir estrategia (.parquet)",
+            type=["parquet"],
+            key=f"comp_uploader_{len(st.session_state.comp_strategies)}",
+        )
+    with up_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        add_btn = st.button("➕ Añadir", use_container_width=True,
+                            disabled=new_file is None)
+
+    if add_btn and new_file is not None:
+        raw = new_file.read()
+        fname = new_file.name.replace(".parquet", "")
+        existing_names = [s["name"] for s in st.session_state.comp_strategies]
+        name = fname; suffix = 2
+        while name in existing_names:
+            name = f"{fname}_{suffix}"; suffix += 1
+        st.session_state.comp_strategies.append({"name": name, "bytes": raw})
+        st.rerun()
+
+    if st.session_state.comp_strategies:
+        st.markdown(f"**{len(st.session_state.comp_strategies)} estrategia(s) cargada(s):**")
+        for i, strat in enumerate(st.session_state.comp_strategies):
+            row = st.columns([0.4, 2.5, 1])
+            color = COMP_COLORS[i % len(COMP_COLORS)]
+            row[0].markdown(
+                f"<div style='width:18px;height:18px;background:{color};"
+                f"border-radius:3px;margin-top:8px'></div>",
+                unsafe_allow_html=True,
+            )
+            new_name = row[1].text_input(
+                "Nombre", value=strat["name"],
+                key=f"comp_name_{i}", label_visibility="collapsed",
+            )
+            st.session_state.comp_strategies[i]["name"] = new_name
+            if row[2].button("🗑 Eliminar", key=f"comp_del_{i}", use_container_width=True):
+                st.session_state.comp_strategies.pop(i)
+                st.rerun()
+    else:
+        st.info("Carga al menos una estrategia con el selector de arriba.")
+
+    if st.session_state.comp_strategies:
         st.divider()
-        profitable = (final_equities > initial_capital).mean() * 100
-        st.metric("Paths rentables", f"{profitable:.1f}%")
-        above_actual = (final_equities > actual_final).mean() * 100
-        st.metric("Paths > curva real", f"{above_actual:.1f}%")
+
+        comp_dfs, comp_names = [], []
+        for strat in st.session_state.comp_strategies:
+            try:
+                cdf = load_and_compute(
+                    strat["bytes"], initial_capital, risk_pct,
+                    compound, include_commissions,
+                    from_date if date_filter else None,
+                    to_date   if date_filter else None,
+                    rvol_min, entry_vol_min,
+                )
+                # Apply advanced post-filters + recompute equity
+                if any_advanced:
+                    mask = pd.Series(True, index=cdf.index)
+                    if ep_filter:
+                        mask &= cdf["entry_price"].between(ep_min, ep_max)
+                    if et_filter and et_from and et_to:
+                        mask &= cdf["entry_time"].dt.date.between(et_from, et_to)
+                    if pdc_filter:
+                        mask &= cdf["pct_from_pdc"].between(pdc_min, pdc_max)
+                    if ticker_filter and selected_tickers:
+                        mask &= cdf["ticker"].isin(selected_tickers)
+                    cdf = recompute_equity(cdf[mask], initial_capital)
+                comp_dfs.append(cdf)
+                comp_names.append(strat["name"])
+            except Exception as e:
+                st.error(f"{strat['name']}: {e}")
+
+    def _strat_metrics(cdf, name):
+        _net  = cdf["scaled_pnl"].sum()
+        _sh   = (cdf["ret_pct"].mean() / cdf["ret_pct"].std() * np.sqrt(252)
+                 if cdf["ret_pct"].std() else 0)
+        return {
+            "Estrategia":    name,
+            "Período":       (f"{cdf['entry_time'].min().strftime('%Y-%m-%d')} → "
+                              f"{cdf['entry_time'].max().strftime('%Y-%m-%d')}"),
+            "Trades":        f"{len(cdf):,}",
+            "Win Rate":      f"{cdf['winner'].mean()*100:.1f}%",
+            "Net PnL":       fmt_dollar(_net),
+            "Return":        f"{_net/initial_capital*100:+.1f}%",
+            "Comisiones":    f"${cdf['commission'].sum():,.2f}",
+            "Profit Factor": f"{pf(cdf['scaled_pnl']):.2f}",
+            "Sharpe":        f"{_sh:.2f}",
+            "Max DD":        f"{cdf['drawdown_pct'].min():.1f}%",
+            "Expectancy":    fmt_dollar(cdf["scaled_pnl"].mean()),
+            "Avg Hold":      f"{cdf['hold_h'].mean():.1f}h",
+        }
+
+    if st.session_state.comp_strategies and comp_dfs:
+        metrics_df = pd.DataFrame(
+            [_strat_metrics(cdf, name) for cdf, name in zip(comp_dfs, comp_names)]
+        ).set_index("Estrategia")
+
+        st.markdown("#### 📋 Tabla comparativa")
+        st.dataframe(metrics_df.T, use_container_width=True)
+
+        st.divider()
+
+        show_combined = st.checkbox("⚡ Mostrar equity combinada (suma de todas)", value=True)
+
+        fig_comp = go.Figure()
+        if not spy_df.empty:
+            fig_comp.add_trace(go.Scatter(
+                x=spy_df["date"], y=spy_df["bnh_equity"],
+                mode="lines", name="SPY Buy & Hold",
+                line=dict(color="#FF9800", width=1.8, dash="dot"),
+            ))
+        for i, (cdf, name) in enumerate(zip(comp_dfs, comp_names)):
+            color = COMP_COLORS[i % len(COMP_COLORS)]
+            fig_comp.add_trace(go.Scatter(
+                x=cdf["entry_time"], y=cdf["equity_curve"],
+                mode="lines", name=name,
+                line=dict(color=color, width=1.8),
+            ))
+        if show_combined and len(comp_dfs) > 1:
+            combined = pd.concat(
+                [cdf[["entry_time","scaled_pnl"]].copy() for cdf in comp_dfs],
+                ignore_index=True,
+            ).sort_values("entry_time").reset_index(drop=True)
+            combined["equity"] = initial_capital + combined["scaled_pnl"].cumsum()
+            fig_comp.add_trace(go.Scatter(
+                x=combined["entry_time"], y=combined["equity"],
+                mode="lines", name="⚡ Combinada",
+                line=dict(color="#ffffff", width=2.5),
+            ))
+        fig_comp.add_hline(y=initial_capital, line_dash="dot",
+                           line_color=SUB, opacity=0.4,
+                           annotation_text="Capital inicial")
+        fig_comp.update_layout(
+            **PLOTLY_LAYOUT, height=540,
+            title="Comparación de Equity Curves",
+            xaxis_title="Fecha", yaxis_title="Equity ($)",
+        )
+        fig_comp.update_xaxes(gridcolor="#2e3547")
+        fig_comp.update_yaxes(gridcolor="#2e3547")
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+        if show_combined and len(comp_dfs) > 1:
+            st.divider()
+            st.markdown("#### ⚡ Métricas de la equity combinada")
+            all_t = pd.concat(
+                [cdf[["entry_time","scaled_pnl","gross_pnl","commission","winner","ret_pct"]].copy()
+                 for cdf in comp_dfs],
+                ignore_index=True,
+            ).sort_values("entry_time").reset_index(drop=True)
+            all_t["equity_curve"] = initial_capital + all_t["scaled_pnl"].cumsum()
+            roll_max = all_t["equity_curve"].cummax()
+            all_t["drawdown_pct"] = (all_t["equity_curve"] - roll_max) / roll_max * 100
+            _cn  = all_t["scaled_pnl"].sum()
+            _csh = (all_t["ret_pct"].mean() / all_t["ret_pct"].std() * np.sqrt(252)
+                    if all_t["ret_pct"].std() else 0)
+            ck1,ck2,ck3,ck4,ck5,ck6,ck7,ck8 = st.columns(8)
+            ck1.metric("Trades",        f"{len(all_t):,}")
+            ck2.metric("Win Rate",      f"{all_t['winner'].mean()*100:.1f}%")
+            ck3.metric("Net PnL",       fmt_dollar(_cn))
+            ck4.metric("Return",        f"{_cn/initial_capital*100:+.1f}%")
+            ck5.metric("Profit Factor", f"{pf(all_t['scaled_pnl']):.2f}")
+            ck6.metric("Sharpe",        f"{_csh:.2f}")
+            ck7.metric("Max DD",        f"{all_t['drawdown_pct'].min():.1f}%")
+            ck8.metric("Comisiones",    f"${all_t['commission'].sum():,.2f}")

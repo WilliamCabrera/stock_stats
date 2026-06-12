@@ -1,5 +1,4 @@
 services:
-
   # ── FastAPI ──────────────────────────────────────────────────────────────────
   api:
     build: .
@@ -11,7 +10,7 @@ services:
     environment:
       TZ: America/New_York
     volumes:
-      - .:/app           # hot-reload in dev
+      - .:/app # hot-reload in dev
 
   # ── Pipeline — idle container used by Ofelia to run the incremental sync ─────
   pipeline:
@@ -40,8 +39,34 @@ services:
       ofelia.job-exec.update-full-dataset.save-folder: /logs
       ofelia.job-exec.incremental-backtest.schedule: "0 0 4 * * *"
       ofelia.job-exec.incremental-backtest.command: >-
-        python -c "from strategies.iterative.small_caps import run_iterative_incremental_backtest; run_iterative_incremental_backtest()"
+        python -c "from strategies.iterative.backtest_helpers import run_iterative_incremental_backtest; run_iterative_incremental_backtest()"
       ofelia.job-exec.incremental-backtest.save-folder: /logs
+
+  # ── Backtest Dashboard — Streamlit ──────────────────────────────────────────
+  dashboard:
+    build: .
+    command: streamlit run strategies/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      TZ: America/New_York
+    volumes:
+      - .:/app
+
+  # ── Logs Dashboard — Streamlit ───────────────────────────────────────────────
+  logs-dashboard:
+    build: .
+    command: streamlit run strategies/logs_dashboard.py --server.port 8502 --server.address 0.0.0.0
+    restart: unless-stopped
+    ports:
+      - "8502:8502"
+    env_file: .env
+    environment:
+      TZ: America/New_York
+    volumes:
+      - .:/app
 
   # ── Ofelia — cron scheduler (runs incremental pipeline every Friday 21:00 ET)
   ofelia:

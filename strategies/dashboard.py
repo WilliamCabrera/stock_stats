@@ -540,9 +540,9 @@ def load_and_compute(file_bytes: bytes, initial_capital: float,
     df = df.sort_values("entry_time").reset_index(drop=True)
 
     if from_date:
-        df = df[df["entry_time"].dt.date >= from_date]
+        df = df[df["entry_time"] >= pd.Timestamp(from_date)]
     if to_date:
-        df = df[df["entry_time"].dt.date <= to_date]
+        df = df[df["entry_time"] < pd.Timestamp(to_date) + pd.Timedelta(days=1)]
     if rvol_min > 0:
         df = df[df["rvol_daily"] >= rvol_min]
     if entry_vol_min > 0:
@@ -706,7 +706,7 @@ if any_advanced:
     if ep_filter:
         mask &= df["entry_price"].between(ep_min, ep_max)
     if et_filter and et_from and et_to:
-        mask &= df["entry_time"].dt.date.between(et_from, et_to)
+        mask &= df["entry_time"].between(pd.Timestamp(et_from), pd.Timestamp(et_to) + pd.Timedelta(days=1))
     if pdc_filter:
         mask &= df["pct_from_pdc"].between(pdc_min, pdc_max)
     if ticker_filter and selected_tickers:
@@ -1901,7 +1901,7 @@ with tab9:
                     if ep_filter:
                         mask &= cdf["entry_price"].between(ep_min, ep_max)
                     if et_filter and et_from and et_to:
-                        mask &= cdf["entry_time"].dt.date.between(et_from, et_to)
+                        mask &= cdf["entry_time"].between(pd.Timestamp(et_from), pd.Timestamp(et_to) + pd.Timedelta(days=1))
                     if pdc_filter:
                         mask &= cdf["pct_from_pdc"].between(pdc_min, pdc_max)
                     if ticker_filter and selected_tickers:

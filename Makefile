@@ -3,7 +3,7 @@ WORKERS ?= 1
 PROCS   ?= 4
 CONCUR  ?= 10
 
-.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts reload-scheduler dashboard
+.PHONY: build start stop restart logs ps shell test clean pipeline pipeline-sample clean-charts reload-scheduler dashboard tqqq-dataset tqqq-dataset-5m tqqq-dataset-1h tqqq-walkforward tqqq-walkforward-5m tqqq-walkforward-1h
 
 ## Build all images (no cache)
 build:
@@ -102,3 +102,23 @@ dashboard:
 ## Use  make clean-charts FORCE=1  to skip confirmation
 clean-charts:
 	@bash scripts/clean_tmp_charts.sh $(FORCE)
+
+## Build TQQQ dataset (last 5 years) → backtest_dataset/INDICES/TQQQ/{5m,1h}/tqqq_full_dataset.parquet
+tqqq-dataset:
+	.venv/bin/python -m scripts.build_tqqq_dataset
+
+tqqq-dataset-5m:
+	.venv/bin/python -m scripts.build_tqqq_dataset --timeframe 5m
+
+tqqq-dataset-1h:
+	.venv/bin/python -m scripts.build_tqqq_dataset --timeframe 1h
+
+## Build TQQQ walk-forward folds → backtest_dataset/INDICES/TQQQ/walkforward/{5m,1h}/fold_{1,2,3}/
+tqqq-walkforward:
+	.venv/bin/python -m scripts.build_tqqq_walkforward_dataset
+
+tqqq-walkforward-5m:
+	.venv/bin/python -m scripts.build_tqqq_walkforward_dataset --timeframe 5m
+
+tqqq-walkforward-1h:
+	.venv/bin/python -m scripts.build_tqqq_walkforward_dataset --timeframe 1h

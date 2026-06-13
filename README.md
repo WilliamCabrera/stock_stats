@@ -121,6 +121,66 @@ python -m scripts.plot_trade --ticker ABOS --date 2022-09-28
 
 ---
 
+### `scripts/build_tqqq_dataset.py`
+Builds the TQQQ index dataset for the last 5 years in 5m and 1h timeframes. Candles are fetched from Massive via `fetch_candles` in **1-month batches** to avoid overloading responses and losing data, then merged, deduplicated and written to:
+
+```
+backtest_dataset/INDICES/TQQQ/5m/tqqq_full_dataset.parquet
+backtest_dataset/INDICES/TQQQ/1h/tqqq_full_dataset.parquet
+```
+
+```bash
+# Both timeframes (5m and 1h)
+make tqqq-dataset
+python -m scripts.build_tqqq_dataset
+
+# Single timeframe
+make tqqq-dataset-5m
+make tqqq-dataset-1h
+python -m scripts.build_tqqq_dataset --timeframe 5m
+
+# Custom date range
+python -m scripts.build_tqqq_dataset --timeframe 1h --from 2023-01-01 --to 2024-12-31
+```
+
+Columns: `ticker, date, date_str, open, high, low, close, volume` (session 04:00–20:00 ET, zstd compression).
+
+---
+
+### `scripts/build_tqqq_walkforward_dataset.py`
+Slices the full TQQQ dataset (no API re-fetch) into walk-forward folds with the same structure as `backtest_dataset/walkforward`. Windows keep the stock walkforward proportions (IS = 2 × OOS, slide = OOS) but scaled to **IS 24M / OOS 12M / slide 12M** so 3 folds cover the full 5-year range:
+
+```
+Fold 1: IS [d0,      d0+24M)   OOS [d0+24M, d0+36M)
+Fold 2: IS [d0+12M,  d0+36M)   OOS [d0+36M, d0+48M)
+Fold 3: IS [d0+24M,  d0+48M)   OOS [d0+48M, d0+60M)
+```
+
+Output:
+
+```
+backtest_dataset/INDICES/TQQQ/walkforward/{5m,1h}/fold_{1,2,3}/in_sample.parquet
+backtest_dataset/INDICES/TQQQ/walkforward/{5m,1h}/fold_{1,2,3}/out_of_sample.parquet
+```
+
+```bash
+# Both timeframes (5m and 1h)
+make tqqq-walkforward
+python -m scripts.build_tqqq_walkforward_dataset
+
+# Single timeframe
+make tqqq-walkforward-5m
+make tqqq-walkforward-1h
+python -m scripts.build_tqqq_walkforward_dataset --timeframe 5m
+
+# Custom windows (months)
+python -m scripts.build_tqqq_walkforward_dataset --is-months 12 --oos-months 6 --slide-months 6
+```
+
+Requires `tqqq_full_dataset.parquet` (run `make tqqq-dataset` first).
+
+---
+
 ## Automated daily pipeline
 
 Three jobs run automatically every day via **Ofelia** (the Docker-based cron scheduler). They execute inside the `pipeline` container and are defined in `docker-compose.yml`.

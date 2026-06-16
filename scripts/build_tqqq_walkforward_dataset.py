@@ -1,7 +1,7 @@
 """
 Build walk-forward folds for the TQQQ index dataset.
 
-Slices backtest_dataset/INDICES/TQQQ/{5m,1h}/tqqq_full_dataset.parquet
+Slices backtest_dataset/INDICES/TQQQ/{5m,1h,1d}/tqqq_full_dataset.parquet
 (no API re-fetch) into the same fold structure as backtest_dataset/walkforward:
 
     Fold 1: IS [d0,        d0+24M)   OOS [d0+24M, d0+36M)
@@ -47,7 +47,7 @@ TICKER       = "TQQQ"
 INPUT_BASE   = Path("backtest_dataset/INDICES") / TICKER
 INPUT_NAME   = "tqqq_full_dataset.parquet"
 OUTPUT_BASE  = INPUT_BASE / "walkforward"
-TIMEFRAMES   = ["5m", "1h"]
+TIMEFRAMES   = ["5m", "10m", "1h", "1d"]
 
 IS_MONTHS    = 24   # in-sample window length (months)
 OOS_MONTHS   = 12   # out-of-sample window length (months)
@@ -165,6 +165,21 @@ def build_timeframe(
             f["oos_start"], f["oos_end"], fold_dir / "out_of_sample.parquet",
         )
 
+    # Final OOS: everything in the full dataset after the last fold's OOS end.
+    # Grows automatically as new data is fetched via make tqqq-dataset.
+    last_oos_end = folds[-1]["oos_end"]
+    final_oos = df[df["date_str"] >= last_oos_end.isoformat()].sort_values("date").reset_index(drop=True)
+    out_path = OUTPUT_BASE / timeframe / "final_oos.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    final_oos.to_parquet(out_path, index=False, compression="zstd")
+    if final_oos.empty:
+        logger.info("%s final_oos: no data yet after %s (populate by running make tqqq-dataset)", timeframe, last_oos_end)
+    else:
+        logger.info(
+            "%s final_oos: %d rows  (%s → %s)  → %s",
+            timeframe, len(final_oos), final_oos["date_str"].min(), final_oos["date_str"].max(), out_path,
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -173,7 +188,7 @@ def main() -> None:
     parser.add_argument(
         "--timeframe",
         choices=TIMEFRAMES,
-        help="Timeframe to build. Omit to build both (5m and 1h).",
+        help="Timeframe to build. Omit to build all (5m, 1h, 1d).",
     )
     parser.add_argument("--is-months",    type=int, default=IS_MONTHS,
                         help=f"In-sample window in months (default: {IS_MONTHS}).")

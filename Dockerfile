@@ -31,4 +31,4 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY . .
 
-EXPOSE 8000 8501 8502
+EXPOSE 8000 8501 8502 8503

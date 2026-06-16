@@ -4,7 +4,7 @@ Massive.com (Polygon.io-compatible) market data client.
 Provides sync and async versions of fetch_candles so the same logic
 can be used from both Celery tasks (sync) and FastAPI routes (async).
 
-Supported timeframes: "1m", "5m", "30m", "1h", "1d"
+Supported timeframes: "1m", "5m", "10m", "15m", "30m", "1h", "1d"
 
 Usage (sync — Celery tasks):
     from app.utils.massive import fetch_candles
@@ -42,13 +42,14 @@ logger = logging.getLogger(__name__)
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 
-TimeFrame = Literal["1m", "5m", "15m", "30m", "1h", "1d"]
+TimeFrame = Literal["1m", "5m", "10m", "15m", "30m", "1h", "1d"]
 
 Candle = dict  # {time: int (UTC seconds), open, high, low, close, volume}
 
 _TF_MAP: dict[str, tuple[int, str]] = {
     "1m":  (1,  "minute"),
     "5m":  (5,  "minute"),
+    "10m": (10, "minute"),
     "15m": (15, "minute"),
     "30m": (30, "minute"),
     "1h":  (1,  "hour"),

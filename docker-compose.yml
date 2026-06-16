@@ -41,6 +41,10 @@ services:
       ofelia.job-exec.incremental-backtest.command: >-
         python -c "from strategies.iterative.backtest_helpers import run_iterative_incremental_backtest; run_iterative_incremental_backtest()"
       ofelia.job-exec.incremental-backtest.save-folder: /logs
+      ofelia.job-exec.update-indices-dataset.schedule: "0 0 22 * * *"
+      ofelia.job-exec.update-indices-dataset.command: >-
+        python -m scripts.update_indices_dataset
+      ofelia.job-exec.update-indices-dataset.save-folder: /logs
 
   # ── Backtest Dashboard — Streamlit ──────────────────────────────────────────
   dashboard:
@@ -62,6 +66,19 @@ services:
     restart: unless-stopped
     ports:
       - "8502:8502"
+    env_file: .env
+    environment:
+      TZ: America/New_York
+    volumes:
+      - .:/app
+
+  # ── Signal Candle Dashboard — Streamlit ─────────────────────────────────────
+  signal-candle-dashboard:
+    build: .
+    command: streamlit run strategies/signal_candle_dashboard.py --server.port 8503 --server.address 0.0.0.0
+    restart: unless-stopped
+    ports:
+      - "8503:8503"
     env_file: .env
     environment:
       TZ: America/New_York

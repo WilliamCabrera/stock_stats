@@ -8,6 +8,7 @@ from strategies.iterative.small_caps import (
     short_push_exhaustion_iterative,
     push_rejection_iterative,
 )
+from strategies.iterative.trend_following import ema100_trend_follower_iterative
 
 STRATEGIES = [
     {
@@ -36,6 +37,13 @@ STRATEGIES = [
         "strategy_func": push_rejection_iterative,
         "params": [
             {"slippage": 0.001, "gap_pct": 0.40, "stop_pct": 0.50, "tp_pct": 0.20, "out_put_name": "push_rejection_iterative_0.4_0.5_0.2"},
+        ],
+    },
+    {
+        "strategy_name": "ema100_trend_follower_iterative",
+        "strategy_func": ema100_trend_follower_iterative,
+        "params": [
+            {"slippage": 0.001, "gap_pct": 0.40, "stop_pct": 0.50, "tp_pct": 0.20, "out_put_name": "ema100_trend_follower_iterative_100_20_14"},
         ],
     },
 ]

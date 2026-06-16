@@ -756,6 +756,16 @@ if _spy_key:
     except Exception:
         pass
 
+# Extra SPY risk metrics derived from the B&H equity curve
+spy_sharpe_bnh = None
+spy_mdd_bnh    = None
+if not spy_df.empty:
+    _spy_daily = spy_df["bnh_equity"].pct_change().dropna() * 100
+    if _spy_daily.std() > 0:
+        spy_sharpe_bnh = (_spy_daily.mean() / _spy_daily.std()) * np.sqrt(252)
+    _spy_rm = spy_df["bnh_equity"].cummax()
+    spy_mdd_bnh = ((spy_df["bnh_equity"] - _spy_rm) / _spy_rm * 100).min()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -772,53 +782,67 @@ st.caption(
 st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KPI CARDS — row 1: performance
+# KPI SECTIONS
 # ─────────────────────────────────────────────────────────────────────────────
-c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
-perf_kpis = [
-    (c1, "Total Trades",   f"{total:,}",             None),
-    (c2, "Win Rate",       f"{wr:.1f}%",              GREEN if wr >= 50 else RED),
-    (c3, "Gross PnL",      fmt_dollar(gross_pnl),     color_val(gross_pnl)),
-    (c4, "Net PnL",        fmt_dollar(net_pnl),       color_val(net_pnl)),
-    (c5, "Return Total",   f"{total_ret:+.1f}%",      color_val(total_ret)),
-    (c6, "Profit Factor",  f"{pf_val:.2f}",           GREEN if pf_val >= 1 else RED),
-    (c7, "Sharpe (ann.)",  f"{sh:.2f}",               GREEN if sh >= 1 else (YELLOW if sh >= 0 else RED)),
-    (c8, "Max Drawdown",   f"{mdd_pct:.1f}%",         RED),
-    (c9, "Avg Hold",       f"{avg_hold:.1f}h",        None),
-]
-for col, label, value, _ in perf_kpis:
-    col.metric(label, value)
 
-# ── KPI row SPY ───────────────────────────────────────────────────────────────
-if spy_bnh_ret is not None:
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("SPY B&H Equity",  f"${spy_bnh_eq:,.0f}",
-              delta=f"{spy_bnh_ret:+.1f}%")
-    s2.metric("SPY B&H Return",  f"{spy_bnh_ret:+.1f}%")
-    s3.metric("Estrategia Ret.", f"{total_ret:+.1f}%")
-    s4.metric("Alpha vs SPY",    f"{spy_alpha:+.1f}%",
-              delta="outperform ✅" if spy_alpha > 0 else "underperform ❌",
-              delta_color="normal" if spy_alpha > 0 else "inverse")
+# ── 1. Rendimiento — Estrategia vs S&P 500 ───────────────────────────────────
+has_spy = spy_bnh_ret is not None
+st.markdown("**Rendimiento**")
+if has_spy:
+    col_strat, col_spy = st.columns(2)
+    with col_strat:
+        st.caption("ESTRATEGIA")
+        r1, r2 = st.columns(2)
+        r1.metric("Return Total",  f"{total_ret:+.1f}%")
+        r2.metric("Final Equity",  f"${final_eq:,.0f}")
+        r3, r4 = st.columns(2)
+        r3.metric("Max Drawdown",  f"{mdd_pct:.1f}%")
+        r4.metric("Sharpe (ann.)", f"{sh:.2f}")
+    with col_spy:
+        st.caption("S&P 500 B&H")
+        r5, r6 = st.columns(2)
+        r5.metric("Return Total",  f"{spy_bnh_ret:+.1f}%",
+                  delta=f"alpha {spy_alpha:+.1f}%",
+                  delta_color="normal" if spy_alpha > 0 else "inverse")
+        r6.metric("Final Equity",  f"${spy_bnh_eq:,.0f}")
+        r7, r8 = st.columns(2)
+        r7.metric("Max Drawdown",  f"{spy_mdd_bnh:.1f}%" if spy_mdd_bnh is not None else "—")
+        r8.metric("Sharpe (ann.)", f"{spy_sharpe_bnh:.2f}" if spy_sharpe_bnh is not None else "—")
+else:
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Return Total",  f"{total_ret:+.1f}%")
+    p2.metric("Final Equity",  f"${final_eq:,.0f}")
+    p3.metric("Max Drawdown",  f"{mdd_pct:.1f}%")
+    p4.metric("Sharpe (ann.)", f"{sh:.2f}")
 
-# ── KPI row 2: expectancy + commission breakdown ──────────────────────────────
+# ── 2. Operativa ──────────────────────────────────────────────────────────────
+st.markdown("")
+st.markdown("**Operativa**")
+o1, o2, o3, o4, o5, o6 = st.columns(6)
+o1.metric("Total Trades",  f"{total:,}")
+o2.metric("Win Rate",      f"{wr:.1f}%")
+o3.metric("Profit Factor", f"{pf_val:.2f}")
+o4.metric("Gross PnL",     fmt_dollar(gross_pnl))
+o5.metric("Net PnL",       fmt_dollar(net_pnl))
+o6.metric("Avg Hold",      f"{avg_hold:.1f}h")
+
+# ── 3. Costes ─────────────────────────────────────────────────────────────────
 st.markdown("")
 if include_commissions:
-    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-    k1.metric("Expectancy Bruta",  fmt_dollar(expectancy_gross),
-              delta=f"{expectancy_gross/abs(expectancy_gross)*100:.0f}%" if expectancy_gross else None)
-    k2.metric("Avg Comisión",      f"-${expectancy_comm:.2f}", delta=f"{comm_drag:.1f}% drag",
-              delta_color="inverse")
+    st.markdown("**Costes**")
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Expectancy Bruta",  fmt_dollar(expectancy_gross))
+    k2.metric("Avg Comisión",      f"-${expectancy_comm:.2f}",
+              delta=f"{comm_drag:.1f}% drag", delta_color="inverse")
     k3.metric("Expectancy Neta",   fmt_dollar(expectancy_net),
               delta=fmt_dollar(expectancy_net - expectancy_gross))
     k4.metric("Total Comisiones",  f"${total_comm:,.2f}")
     k5.metric("Comm. Drag",        f"{comm_drag:.1f}%")
     k6.metric("Avg Shares/Trade",  f"{df['shares'].mean():,.0f}")
-    k7.metric("Final Equity",      f"${final_eq:,.0f}")
 else:
-    k1, k2, k3 = st.columns(3)
+    k1, k2 = st.columns(2)
     k1.metric("Expectancy / Trade", fmt_dollar(expectancy_gross))
     k2.metric("Avg Shares / Trade", f"{df['shares'].mean():,.0f}")
-    k3.metric("Final Equity",       f"${final_eq:,.0f}")
 
 st.divider()
 

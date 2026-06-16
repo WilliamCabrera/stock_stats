@@ -1,20 +1,26 @@
 """
-Build the TQQQ index dataset for backtest_dataset/INDICES/TQQQ/{5m,1h}.
+Build the TQQQ index dataset for backtest_dataset/INDICES/TQQQ/{5m,10m,1h,1d}.
 
-Fetches the last 5 years of OHLCV candles from Massive via fetch_candles
-in 1-month batches (so no single request is too large and no data is lost),
-then writes the merged result to:
+Fetches the last 5 years of OHLCV candles from Massive in 1-month batches,
+computes indicators, and joins cross-timeframe columns:
 
-    backtest_dataset/INDICES/TQQQ/5m/tqqq_full_dataset.parquet
-    backtest_dataset/INDICES/TQQQ/1h/tqqq_full_dataset.parquet
+    1d  → sma_9/20/50/200, atr_14, daily_range, daily_range_ma10
+    1h  → sma_9/20/50/200, atr_14, daily_range_ma10
+    5m  → sma_9/20/50/200, atr_14, daily_range_ma10, h1_9am_high, h1_9am_low
+    10m → sma_9/20/50/200, atr_14, daily_range_ma10, h1_9am_high, h1_9am_low
+
+Output:
+    backtest_dataset/INDICES/TQQQ/{5m,10m,1h,1d}/tqqq_full_dataset.parquet
 
 Usage (from backtester_api/):
+    python -m scripts.build_tqqq_dataset              # all timeframes
     python -m scripts.build_tqqq_dataset --timeframe 5m
+    python -m scripts.build_tqqq_dataset --timeframe 10m
     python -m scripts.build_tqqq_dataset --timeframe 1h
-    python -m scripts.build_tqqq_dataset                 # both timeframes
+    python -m scripts.build_tqqq_dataset --timeframe 1d
 
     # Custom date range
-    python -m scripts.build_tqqq_dataset --timeframe 5m --from 2023-01-01 --to 2024-12-31
+    python -m scripts.build_tqqq_dataset --from 2023-01-01 --to 2024-12-31
 """
 from __future__ import annotations
 
@@ -29,6 +35,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath("."))
 
+from app.utils.indicators import compute_atr, compute_sma
 from app.utils.massive import fetch_candles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,131 +44,153 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TICKER       = "TQQQ"
-OUTPUT_BASE  = Path("backtest_dataset/INDICES") / TICKER
-OUTPUT_NAME  = "tqqq_full_dataset.parquet"
-TIMEFRAMES   = ["5m", "1h"]
-
+TICKER     = "TQQQ"
+BASE       = Path("backtest_dataset/INDICES/TQQQ")
+NAME       = "tqqq_full_dataset.parquet"
+TIMEFRAMES = ["5m", "10m", "1h", "1d"]
 YEARS_BACK = 5
-
-SESSION_START = "04:00"
-SESSION_END   = "20:00"
-
-COLUMNS = ["ticker", "date", "date_str", "open", "high", "low", "close", "volume"]
+SESSION    = ("04:00", "20:00")
+COLS       = ["ticker", "date", "date_str", "open", "high", "low", "close", "volume"]
 
 
-def default_from_date(today: date | None = None) -> date:
-    """Start date: 5 years before today."""
-    today = today or date.today()
+def default_from() -> date:
+    today = date.today()
     try:
         return today.replace(year=today.year - YEARS_BACK)
-    except ValueError:  # Feb 29 on a non-leap target year
+    except ValueError:
         return today.replace(year=today.year - YEARS_BACK, day=28)
 
 
 # ---------------------------------------------------------------------------
-# Monthly batching
+# Helpers
 # ---------------------------------------------------------------------------
 
 def month_ranges(from_date: date, to_date: date) -> list[tuple[date, date]]:
-    """
-    Split [from_date, to_date] into consecutive ~1-month windows.
-
-    Each window is [start, end] inclusive and windows do not overlap, so
-    concatenating the batches yields the full range without duplicates.
-    """
-    ranges: list[tuple[date, date]] = []
-    start = from_date
+    ranges, start = [], from_date
     while start <= to_date:
-        # First day of the next month
-        if start.month == 12:
-            next_month = date(start.year + 1, 1, 1)
-        else:
-            next_month = date(start.year, start.month + 1, 1)
-        end = min(next_month - timedelta(days=1), to_date)
-        ranges.append((start, end))
-        start = next_month
+        next_m = date(start.year + (start.month // 12), start.month % 12 + 1, 1)
+        ranges.append((start, min(next_m - timedelta(days=1), to_date)))
+        start = next_m
     return ranges
 
 
-# ---------------------------------------------------------------------------
-# Fetch + build
-# ---------------------------------------------------------------------------
-
-def build_timeframe(timeframe: str, from_date: date, to_date: date) -> None:
-    """Fetch all monthly batches for one timeframe and write the parquet."""
+def fetch_tf(tf: str, from_date: date, to_date: date) -> pd.DataFrame:
+    use_session = tf != "1d"
     batches = month_ranges(from_date, to_date)
-    logger.info(
-        "Building %s %s dataset: %s → %s  (%d monthly batches)",
-        TICKER, timeframe, from_date, to_date, len(batches),
-    )
-
-    parts: list[pd.DataFrame] = []
-    for n, (start, end) in enumerate(batches, 1):
-        candles = fetch_candles(
-            TICKER,
-            start.isoformat(),
-            end.isoformat(),
-            timeframe=timeframe,
-            session_start=SESSION_START,
-            session_end=SESSION_END,
-        )
+    logger.info("Fetching %s %s: %s → %s  (%d batches)", TICKER, tf, from_date, to_date, len(batches))
+    parts = []
+    for n, (s, e) in enumerate(batches, 1):
+        kw = dict(timeframe=tf)
+        if use_session:
+            kw["session_start"], kw["session_end"] = SESSION
+        candles = fetch_candles(TICKER, s.isoformat(), e.isoformat(), **kw)
         if not candles:
-            logger.warning("Batch %d/%d  %s → %s: no candles.", n, len(batches), start, end)
+            logger.warning("Batch %d/%d  %s→%s: no data", n, len(batches), s, e)
             continue
-
         df = pd.DataFrame(candles)
-        dt_et          = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert("America/New_York")
-        df["date"]     = pd.to_datetime(dt_et.dt.strftime("%Y-%m-%dT%H:%M:%S"))
-        df["date_str"] = dt_et.dt.strftime("%Y-%m-%d")
+        dt             = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert("America/New_York")
+        df["date"]     = pd.to_datetime(dt.dt.strftime("%Y-%m-%dT%H:%M:%S"))
+        df["date_str"] = dt.dt.strftime("%Y-%m-%d")
         df["ticker"]   = TICKER
-        parts.append(df[COLUMNS])
+        parts.append(df[COLS])
+        logger.info("Batch %d/%d  %s→%s: %d bars", n, len(batches), s, e, len(df))
+    return (pd.concat(parts, ignore_index=True)
+              .drop_duplicates(subset=["date"])
+              .sort_values("date").reset_index(drop=True))
 
-        logger.info("Batch %d/%d  %s → %s: %d bars", n, len(batches), start, end, len(df))
 
-    if not parts:
-        logger.error("No data fetched for %s %s — nothing written.", TICKER, timeframe)
-        return
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df["sma_9"]   = compute_sma(df, window=9)
+    df["sma_20"]  = compute_sma(df, window=20)
+    df["sma_50"]  = compute_sma(df, window=50)
+    df["sma_200"] = compute_sma(df, window=200)
+    df["atr_14"]  = compute_atr(df, window=14)
+    return df
 
-    full = (
-        pd.concat(parts, ignore_index=True)
-        .drop_duplicates(subset=["date"])
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
 
-    out_dir = OUTPUT_BASE / timeframe
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / OUTPUT_NAME
-    full.to_parquet(path, index=False, compression="zstd")
-    logger.info(
-        "Wrote %s: %d rows, %s → %s  (%.1f MB)",
-        path, len(full), full["date_str"].min(), full["date_str"].max(),
-        path.stat().st_size / 1e6,
-    )
+def save(df: pd.DataFrame, tf: str) -> Path:
+    path = BASE / tf / NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False, compression="zstd")
+    logger.info("Wrote %s: %d rows, %s → %s  (%.1f MB)",
+                path, len(df), df["date_str"].min(), df["date_str"].max(),
+                path.stat().st_size / 1e6)
+    return path
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Per-timeframe builders
+# ---------------------------------------------------------------------------
+
+def build_1d(from_date: date, to_date: date) -> pd.DataFrame:
+    df = fetch_tf("1d", from_date, to_date)
+    df = add_indicators(df)
+    df["sma_100"]          = compute_sma(df, window=100)
+    df["daily_range"]      = df["high"] - df["low"]
+    df["daily_range_ma10"] = df["daily_range"].rolling(10, min_periods=1).mean()
+    save(df, "1d")
+    return df
+
+
+def build_1h(from_date: date, to_date: date, df1d: pd.DataFrame | None = None) -> pd.DataFrame:
+    if df1d is None:
+        df1d = pd.read_parquet(BASE / "1d" / NAME, columns=["date_str", "daily_range_ma10"])
+    df = fetch_tf("1h", from_date, to_date)
+    df = add_indicators(df)
+    df = df.merge(df1d[["date_str", "daily_range_ma10"]], on="date_str", how="left")
+    save(df, "1h")
+    return df
+
+
+def _h1_9am(df1h: pd.DataFrame) -> pd.DataFrame:
+    return (df1h[df1h["date"].dt.hour == 9][["date_str", "high", "low"]]
+               .rename(columns={"high": "h1_9am_high", "low": "h1_9am_low"}))
+
+
+def build_5m(from_date: date, to_date: date,
+             df1d: pd.DataFrame | None = None,
+             df1h: pd.DataFrame | None = None) -> pd.DataFrame:
+    if df1d is None:
+        df1d = pd.read_parquet(BASE / "1d" / NAME, columns=["date_str", "daily_range_ma10"])
+    if df1h is None:
+        df1h = pd.read_parquet(BASE / "1h" / NAME, columns=["date", "date_str", "high", "low"])
+    df = fetch_tf("5m", from_date, to_date)
+    df = add_indicators(df)
+    df = df.merge(df1d[["date_str", "daily_range_ma10"]], on="date_str", how="left")
+    df = df.merge(_h1_9am(df1h), on="date_str", how="left")
+    save(df, "5m")
+    return df
+
+
+def build_10m(from_date: date, to_date: date,
+              df1d: pd.DataFrame | None = None,
+              df1h: pd.DataFrame | None = None) -> pd.DataFrame:
+    if df1d is None:
+        df1d = pd.read_parquet(BASE / "1d" / NAME, columns=["date_str", "daily_range_ma10"])
+    if df1h is None:
+        df1h = pd.read_parquet(BASE / "1h" / NAME, columns=["date", "date_str", "high", "low"])
+    df = fetch_tf("10m", from_date, to_date)
+    df = add_indicators(df)
+    df = df.merge(df1d[["date_str", "daily_range_ma10"]], on="date_str", how="left")
+    df = df.merge(_h1_9am(df1h), on="date_str", how="left")
+    save(df, "10m")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build TQQQ dataset (5m / 1h, last 5 years) in backtest_dataset/INDICES/TQQQ/."
+        description="Build TQQQ dataset (5m/10m/1h/1d, last 5 years) in backtest_dataset/INDICES/TQQQ/."
     )
-    parser.add_argument(
-        "--timeframe",
-        choices=TIMEFRAMES,
-        help="Timeframe to build. Omit to build both (5m and 1h).",
-    )
-    parser.add_argument(
-        "--from", dest="from_date", default=default_from_date().isoformat(),
-        help="Start date YYYY-MM-DD (default: 5 years ago).",
-    )
-    parser.add_argument(
-        "--to", dest="to_date", default=date.today().isoformat(),
-        help="End date YYYY-MM-DD inclusive (default: today).",
-    )
+    parser.add_argument("--timeframe", choices=TIMEFRAMES,
+                        help="Timeframe to build. Omit to build all.")
+    parser.add_argument("--from", dest="from_date", default=default_from().isoformat(),
+                        help="Start date YYYY-MM-DD (default: 5 years ago).")
+    parser.add_argument("--to", dest="to_date", default=date.today().isoformat(),
+                        help="End date YYYY-MM-DD inclusive (default: today).")
     args = parser.parse_args()
 
     from_date = date.fromisoformat(args.from_date)
@@ -169,9 +198,21 @@ def main() -> None:
     if from_date > to_date:
         parser.error(f"--from {from_date} is after --to {to_date}")
 
-    timeframes = [args.timeframe] if args.timeframe else TIMEFRAMES
-    for tf in timeframes:
-        build_timeframe(tf, from_date, to_date)
+    tf = args.timeframe
+
+    if tf is None:
+        df1d = build_1d(from_date, to_date)
+        df1h = build_1h(from_date, to_date, df1d)
+        build_5m(from_date, to_date, df1d, df1h)
+        build_10m(from_date, to_date, df1d, df1h)
+    elif tf == "1d":
+        build_1d(from_date, to_date)
+    elif tf == "1h":
+        build_1h(from_date, to_date)
+    elif tf == "5m":
+        build_5m(from_date, to_date)
+    elif tf == "10m":
+        build_10m(from_date, to_date)
 
 
 if __name__ == "__main__":

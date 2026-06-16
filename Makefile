@@ -7,7 +7,8 @@ CONCUR  ?= 10
         tqqq-dataset tqqq-dataset-5m tqqq-dataset-10m tqqq-dataset-1h tqqq-dataset-1d tqqq-walkforward tqqq-walkforward-5m tqqq-walkforward-10m tqqq-walkforward-1h tqqq-walkforward-1d \
         qqq-dataset qqq-dataset-5m qqq-dataset-10m qqq-dataset-1h qqq-dataset-1d qqq-walkforward qqq-walkforward-5m qqq-walkforward-10m qqq-walkforward-1h qqq-walkforward-1d \
         update-indices build-index build-index-wf \
-        stock-universe stock-dataset stock-dataset-all stock-merge
+        stock-universe stock-dataset stock-dataset-all stock-merge \
+        low-float low-float-all low-float-merge
 
 ## Build all images (no cache)
 build:
@@ -239,3 +240,37 @@ stock-dataset-all:
 ## Final — merge all shards → backtest_dataset/STOCKS/stock_dataset.parquet
 stock-merge:
 	.venv/bin/python -m scripts.merge_stock_dataset
+
+## ──────────────────────────────────────────────────────────────────────────
+## Low-float per-day session dataset (1m unadjusted, last YEARS years)
+## Pipeline:  low-float (×NUM_SHARDS)  →  low-float-merge
+## Vars: YEARS=5  TCONCUR=6  NUM_SHARDS=1  SHARD=0
+## Requires backtest_dataset/STOCKS/low_float_tickers.parquet (scripts.filter_low_float)
+## ──────────────────────────────────────────────────────────────────────────
+TCONCUR ?= 6
+
+## Build ONE shard → backtest_dataset/LOW_FLOAT/shards/shard_<SHARD>_of_<NUM_SHARDS>.parquet
+## Usage: make low-float NUM_SHARDS=8 SHARD=0   (run once per shard, one terminal each)
+low-float:
+	.venv/bin/python -m scripts.build_low_float_dataset \
+	    --num-shards $(NUM_SHARDS) --shard $(SHARD) \
+	    --years $(YEARS) --ticker-concurrency $(TCONCUR)
+
+## Launch ALL shards in parallel (background) → logs in /tmp/lowfloat_shard_*.log; blocks until done
+## Usage: make low-float-all NUM_SHARDS=8
+low-float-all:
+	@for i in $$(seq 0 $$(($(NUM_SHARDS)-1))); do \
+	    echo "→ shard $$i / $(NUM_SHARDS)"; \
+	    .venv/bin/python -m scripts.build_low_float_dataset --num-shards $(NUM_SHARDS) --shard $$i \
+	        --years $(YEARS) --ticker-concurrency $(TCONCUR) \
+	        > /tmp/lowfloat_shard_$$i.log 2>&1 & \
+	done; \
+	echo "Launched $(NUM_SHARDS) shards. Tail logs:  tail -f /tmp/lowfloat_shard_*.log"; \
+	wait; \
+	echo "All shards finished."
+
+## Final — merge all shards → backtest_dataset/LOW_FLOAT/low_float_dataset.parquet
+low-float-merge:
+	.venv/bin/python -m scripts.merge_stock_dataset \
+	    --shards-dir backtest_dataset/LOW_FLOAT/shards \
+	    --out backtest_dataset/LOW_FLOAT/low_float_dataset.parquet

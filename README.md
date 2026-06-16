@@ -388,6 +388,55 @@ Columns: `ticker, date, date_str, open, high, low, close, volume, sma_9, sma_20,
 
 ---
 
+### Low-float session dataset (`filter_low_float` → `build_low_float_dataset` → merge)
+
+Builds a per-day, per-session dataset (pre-market / market-hours / after-hours) from **1-minute unadjusted** candles for the low-float tickers. Three stages:
+
+**1. `scripts/filter_low_float.py`** — reads `stock_dataset.parquet` and keeps each ticker's most recent non-null float; selects those below the threshold.
+
+Output: `backtest_dataset/STOCKS/low_float_tickers.parquet` (columns `ticker, float, market_cap`)
+
+```bash
+python -m scripts.filter_low_float                  # default < 20,000,000
+python -m scripts.filter_low_float --max-float 10e6
+```
+
+**2. `scripts/build_low_float_dataset.py`** — for each ticker fetches 1m unadjusted candles (04:00–20:00 ET), aggregates per-day sessions via `process_minute_bars` (a corrected fork of `market_utils.process_data_minutes`: prices kept at 6 decimals for sub-penny names, NaN instead of `-1` for empty sessions), reuses `_apply_gap_logic` for `previous_close`/gap/range + split adjustment, and merges `market_cap`/`stock_float` from the stock dataset. **Sharded, resumable, async** (same harness as `build_stock_dataset`). A full 1m fetch per ticker is paginated and fully merged before any per-day aggregation, so a day's candles are never split across responses.
+
+Output: `backtest_dataset/LOW_FLOAT/shards/shard_<I>_of_<N>.parquet`
+
+```bash
+# Single process / smoke test
+python -m scripts.build_low_float_dataset --limit 10 --num-shards 1
+python -m scripts.build_low_float_dataset --tickers JRSH,ZNB --from 2026-06-15 --to 2026-06-15
+
+# Parallel — one terminal per shard
+make low-float NUM_SHARDS=8 SHARD=0    # ... up to SHARD=7
+python -m scripts.build_low_float_dataset --num-shards 8 --shard 0
+
+# Launch all shards in parallel in the background (logs → /tmp/lowfloat_shard_*.log)
+make low-float-all NUM_SHARDS=8        # bump TCONCUR=10 if the API plan allows
+```
+
+Make vars: `YEARS=5 TCONCUR=6 NUM_SHARDS=1 SHARD=0`.
+
+**3. Merge** — concatenates the shards (dedup on `ticker, date_str`).
+
+Output: `backtest_dataset/LOW_FLOAT/low_float_dataset.parquet`
+
+```bash
+make low-float-merge
+python -m scripts.merge_stock_dataset \
+    --shards-dir backtest_dataset/LOW_FLOAT/shards \
+    --out backtest_dataset/LOW_FLOAT/low_float_dataset.parquet
+```
+
+Columns: `ticker, date_str, gap, gap_perc, daily_range, day_range_perc, previous_close, open, high, low, close, volume, premarket_volume, market_hours_volume, high_pm, low_pm, pm_open, highest_in_pm, high_pm_time, high_mh, ah_open, ah_close, ah_high, ah_low, ah_range, ah_range_perc, ah_volume, market_cap, stock_float, split_date_str, split_adjust_factor, time`.
+
+Notes: prices are **unadjusted** (6-decimal precision); `volume` is kept fractional as returned by the source; the day's `high`/`low` cover pre-market + market-hours (after-hours lives only in the `ah_*` columns); `market_cap`/`stock_float` are forward/back-filled per ticker.
+
+---
+
 ## Iterative strategies
 
 ### `strategies/iterative/small_caps.py`

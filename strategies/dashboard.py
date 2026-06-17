@@ -496,7 +496,29 @@ with st.sidebar:
     else:
         selected_tickers = []
 
-    any_advanced = ep_filter or et_filter or pdc_filter or ticker_filter
+    # ── Market Cap / Float filter ─────────────────────────────────────────────
+    st.divider()
+    st.subheader("🏦 Market Cap & Float")
+    mkcap_filter = False; mkcap_min_m = 0.0;  mkcap_max_m = 99999.0
+    float_filter  = False; float_min_m  = 0.0;  float_max_m  = 99999.0
+
+    _fund_sel = st.selectbox(
+        "Filtrar por",
+        ["— Ninguno —", "Market Cap ($M)", "Float (M shares)"],
+        key="fund_filter_sel",
+    )
+    if _fund_sel == "Market Cap ($M)":
+        mkcap_filter = True
+        _mc1, _mc2 = st.columns(2)
+        mkcap_min_m = _mc1.number_input("Min ($M)", 0.0, value=0.0,   step=10.0, key="mkcap_min")
+        mkcap_max_m = _mc2.number_input("Max ($M)", 0.0, value=500.0, step=10.0, key="mkcap_max")
+    elif _fund_sel == "Float (M shares)":
+        float_filter = True
+        _fl1, _fl2 = st.columns(2)
+        float_min_m = _fl1.number_input("Min (M)", 0.0, value=0.0,   step=1.0, key="float_min")
+        float_max_m = _fl2.number_input("Max (M)", 0.0, value=100.0, step=1.0, key="float_max")
+
+    any_advanced = ep_filter or et_filter or pdc_filter or ticker_filter or mkcap_filter or float_filter
     st.divider()
 
     st.subheader("🕯️ Gráfico de velas")
@@ -673,6 +695,18 @@ def fmt_dollar(v):
     sign = "+" if v >= 0 else ""
     return f"{sign}${v:,.2f}"
 
+def compute_streaks(winner: pd.Series) -> pd.Series:
+    """Running streak: +N = N wins consecutivos, -N = N losses consecutivos."""
+    streak = []
+    cur = 0
+    for w in winner:
+        if w:
+            cur = cur + 1 if cur > 0 else 1
+        else:
+            cur = cur - 1 if cur < 0 else -1
+        streak.append(cur)
+    return pd.Series(streak, index=winner.index, dtype=int)
+
 def color_val(v):
     return GREEN if v >= 0 else RED
 
@@ -711,6 +745,10 @@ if any_advanced:
         mask &= df["pct_from_pdc"].between(pdc_min, pdc_max)
     if ticker_filter and selected_tickers:
         mask &= df["ticker"].isin(selected_tickers)
+    if mkcap_filter and "market_cap" in df.columns:
+        mask &= df["market_cap"].fillna(0).between(mkcap_min_m * 1e6, mkcap_max_m * 1e6)
+    if float_filter and "float" in df.columns:
+        mask &= df["float"].fillna(0).between(float_min_m * 1e6, float_max_m * 1e6)
     df = recompute_equity(df[mask], initial_capital)
     if df.empty:
         st.warning("No hay trades con los filtros avanzados seleccionados.")
@@ -737,6 +775,12 @@ avg_comm         = df["commission"].mean()
 expectancy_gross = df["gross_pnl"].mean()
 expectancy_net   = df["scaled_pnl"].mean()
 expectancy_comm  = df["commission"].mean()          # avg comm cost per trade
+
+# ── Streaks ───────────────────────────────────────────────────────────────────
+df["streak"]      = compute_streaks(df["winner"])
+max_win_streak    = int(df["streak"].max())
+max_loss_streak   = int(df["streak"].min())          # negative
+current_streak    = int(df["streak"].iloc[-1])
 
 # ── SPY Buy & Hold (fetched once, used in KPIs + chart) ───────────────────────
 spy_df        = pd.DataFrame()
@@ -785,71 +829,77 @@ st.divider()
 # KPI SECTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── 1. Rendimiento — Estrategia vs S&P 500 ───────────────────────────────────
+# ── KPI Tables — Estrategia vs S&P 500 ───────────────────────────────────────
 has_spy = spy_bnh_ret is not None
-st.markdown("**Rendimiento**")
-if has_spy:
-    col_strat, col_spy = st.columns(2)
-    with col_strat:
-        st.caption("ESTRATEGIA")
-        r1, r2 = st.columns(2)
-        r1.metric("Return Total",  f"{total_ret:+.1f}%")
-        r2.metric("Final Equity",  f"${final_eq:,.0f}")
-        r3, r4 = st.columns(2)
-        r3.metric("Max Drawdown",  f"{mdd_pct:.1f}%")
-        r4.metric("Sharpe (ann.)", f"{sh:.2f}")
-    with col_spy:
-        st.caption("S&P 500 B&H")
-        r5, r6 = st.columns(2)
-        r5.metric("Return Total",  f"{spy_bnh_ret:+.1f}%",
-                  delta=f"alpha {spy_alpha:+.1f}%",
-                  delta_color="normal" if spy_alpha > 0 else "inverse")
-        r6.metric("Final Equity",  f"${spy_bnh_eq:,.0f}")
-        r7, r8 = st.columns(2)
-        r7.metric("Max Drawdown",  f"{spy_mdd_bnh:.1f}%" if spy_mdd_bnh is not None else "—")
-        r8.metric("Sharpe (ann.)", f"{spy_sharpe_bnh:.2f}" if spy_sharpe_bnh is not None else "—")
-else:
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Return Total",  f"{total_ret:+.1f}%")
-    p2.metric("Final Equity",  f"${final_eq:,.0f}")
-    p3.metric("Max Drawdown",  f"{mdd_pct:.1f}%")
-    p4.metric("Sharpe (ann.)", f"{sh:.2f}")
 
-# ── 2. Operativa ──────────────────────────────────────────────────────────────
-st.markdown("")
-st.markdown("**Operativa**")
-o1, o2, o3, o4, o5, o6 = st.columns(6)
-o1.metric("Total Trades",  f"{total:,}")
-o2.metric("Win Rate",      f"{wr:.1f}%")
-o3.metric("Profit Factor", f"{pf_val:.2f}")
-o4.metric("Gross PnL",     fmt_dollar(gross_pnl))
-o5.metric("Net PnL",       fmt_dollar(net_pnl))
-o6.metric("Avg Hold",      f"{avg_hold:.1f}h")
+_cur_label = (f"↑ {current_streak} wins" if current_streak > 0
+              else f"↓ {abs(current_streak)} losses" if current_streak < 0
+              else "—")
+_wl = abs(avg_win / avg_loss) if avg_loss else 0
 
-# ── 3. Costes ─────────────────────────────────────────────────────────────────
-st.markdown("")
+_strat_rows: list[tuple[str, str]] = [
+    ("Capital Inicial",   f"${initial_capital:,}"),
+    ("Return Total",      f"{total_ret:+.1f}%"),
+    ("Final Equity",      f"${final_eq:,.0f}"),
+    ("Max Drawdown",      f"{mdd_pct:.1f}%  (${abs(mdd_abs):,.0f})"),
+    ("Sharpe (ann.)",     f"{sh:.2f}"),
+    ("Total Trades",      f"{total:,}"),
+    ("Win Rate",          f"{wr:.1f}%"),
+    ("Profit Factor",     f"{pf_val:.2f}"),
+    ("Gross PnL",         fmt_dollar(gross_pnl)),
+]
 if include_commissions:
-    st.markdown("**Costes**")
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Expectancy Bruta",  fmt_dollar(expectancy_gross))
-    k2.metric("Avg Comisión",      f"-${expectancy_comm:.2f}",
-              delta=f"{comm_drag:.1f}% drag", delta_color="inverse")
-    k3.metric("Expectancy Neta",   fmt_dollar(expectancy_net),
-              delta=fmt_dollar(expectancy_net - expectancy_gross))
-    k4.metric("Total Comisiones",  f"${total_comm:,.2f}")
-    k5.metric("Comm. Drag",        f"{comm_drag:.1f}%")
-    k6.metric("Avg Shares/Trade",  f"{df['shares'].mean():,.0f}")
+    _strat_rows += [
+        ("Net PnL",           fmt_dollar(net_pnl)),
+        ("Total Comisiones",  f"-${total_comm:,.2f}"),
+        ("Avg Comisión",      f"-${expectancy_comm:.2f}"),
+        ("Comm. Drag",        f"{comm_drag:.1f}%"),
+        ("Expectancy Bruta",  fmt_dollar(expectancy_gross)),
+        ("Expectancy Neta",   fmt_dollar(expectancy_net)),
+    ]
 else:
-    k1, k2 = st.columns(2)
-    k1.metric("Expectancy / Trade", fmt_dollar(expectancy_gross))
-    k2.metric("Avg Shares / Trade", f"{df['shares'].mean():,.0f}")
+    _strat_rows += [
+        ("Expectancy",        fmt_dollar(expectancy_gross)),
+    ]
+_strat_rows += [
+    ("Avg Win",           fmt_dollar(avg_win)),
+    ("Avg Loss",          fmt_dollar(avg_loss)),
+    ("Win/Loss Ratio",    f"{_wl:.2f}"),
+    ("Avg Hold",          f"{avg_hold:.1f}h"),
+    ("Avg Shares/Trade",  f"{df['shares'].mean():,.0f}"),
+    ("Max Win Streak",    f"{max_win_streak}"),
+    ("Max Loss Streak",   f"{abs(max_loss_streak)}"),
+    ("Racha Actual",      _cur_label),
+]
+
+_strat_df = pd.DataFrame(_strat_rows, columns=["Métrica", "Estrategia"])
+
+_tbl_strat, _tbl_spy = st.columns(2)
+with _tbl_strat:
+    st.markdown("**Estrategia**")
+    st.dataframe(_strat_df, hide_index=True, use_container_width=True)
+
+if has_spy:
+    _spy_rows: list[tuple[str, str]] = [
+        ("Return Total",   f"{spy_bnh_ret:+.1f}%"),
+        ("Final Equity",   f"${spy_bnh_eq:,.0f}"),
+        ("Alpha",          f"{spy_alpha:+.1f}%"),
+        ("Max Drawdown",   f"{spy_mdd_bnh:.1f}%" if spy_mdd_bnh is not None else "—"),
+        ("Sharpe (ann.)",  f"{spy_sharpe_bnh:.2f}" if spy_sharpe_bnh is not None else "—"),
+    ]
+    _pad = len(_strat_rows) - len(_spy_rows)
+    _spy_rows += [("", "")] * _pad
+    _spy_df = pd.DataFrame(_spy_rows, columns=["Métrica", "S&P 500 B&H"])
+    with _tbl_spy:
+        st.markdown("**S&P 500 B&H**")
+        st.dataframe(_spy_df, hide_index=True, use_container_width=True)
 
 st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 Equity & Drawdown",
     "💸 Comisiones",
     "📅 Por Período",
@@ -859,6 +909,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📋 Trades",
     "🎲 Montecarlo",
     "⚖️ Comparar",
+    "🏦 Market Cap & Float",
 ])
 
 # ── TAB 1: Equity + Drawdown ──────────────────────────────────────────────────
@@ -1494,6 +1545,94 @@ with tab5:
                         title="Heatmap Net PnL: Día × Hora")
     st.plotly_chart(fig12, use_container_width=True)
 
+    # ── Streak analysis ───────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### 🔗 Rachas (Streaks)")
+
+    str_col1, str_col2 = st.columns(2)
+
+    with str_col1:
+        # Timeline de la racha corriente a lo largo del tiempo
+        fig_str1 = go.Figure()
+        fig_str1.add_trace(go.Bar(
+            x=df["entry_time"],
+            y=df["streak"],
+            marker_color=[GREEN if v > 0 else RED for v in df["streak"]],
+            name="Racha",
+        ))
+        fig_str1.add_hline(y=0, line_color=SUB, line_width=0.8)
+        # Mark max win and max loss
+        _idx_max_w = df["streak"].idxmax()
+        _idx_max_l = df["streak"].idxmin()
+        fig_str1.add_annotation(
+            x=df.loc[_idx_max_w, "entry_time"], y=max_win_streak,
+            text=f"Max +{max_win_streak}", showarrow=True,
+            arrowhead=2, font=dict(color=GREEN, size=10),
+            arrowcolor=GREEN, bgcolor=CARD,
+        )
+        fig_str1.add_annotation(
+            x=df.loc[_idx_max_l, "entry_time"], y=max_loss_streak,
+            text=f"Max {max_loss_streak}", showarrow=True,
+            arrowhead=2, font=dict(color=RED, size=10),
+            arrowcolor=RED, bgcolor=CARD,
+        )
+        fig_str1.update_layout(
+            **PLOTLY_LAYOUT, height=340,
+            title="Racha consecutiva por trade",
+            xaxis_title="Fecha", yaxis_title="Racha (+win / −loss)",
+        )
+        st.plotly_chart(fig_str1, use_container_width=True)
+
+    with str_col2:
+        # Distribución de la longitud de rachas ganadoras y perdedoras
+        # Extraer todas las rachas como grupos
+        _winner_list = df["winner"].tolist()
+        _win_runs, _loss_runs = [], []
+        _cur_len, _cur_type = 1, _winner_list[0]
+        for w in _winner_list[1:]:
+            if w == _cur_type:
+                _cur_len += 1
+            else:
+                (_win_runs if _cur_type else _loss_runs).append(_cur_len)
+                _cur_len, _cur_type = 1, w
+        (_win_runs if _cur_type else _loss_runs).append(_cur_len)
+
+        _max_streak_len = max(max(_win_runs, default=0), max(_loss_runs, default=0))
+        _bins = list(range(1, _max_streak_len + 2))
+
+        fig_str2 = go.Figure()
+        fig_str2.add_trace(go.Histogram(
+            x=_win_runs, xbins=dict(start=0.5, end=_max_streak_len + 0.5, size=1),
+            marker_color=GREEN, opacity=0.75, name="Rachas ganadoras",
+        ))
+        fig_str2.add_trace(go.Histogram(
+            x=_loss_runs, xbins=dict(start=0.5, end=_max_streak_len + 0.5, size=1),
+            marker_color=RED, opacity=0.75, name="Rachas perdedoras",
+        ))
+        fig_str2.update_layout(
+            **PLOTLY_LAYOUT, height=340, barmode="overlay",
+            title="Distribución de longitud de rachas",
+            xaxis_title="Longitud de la racha (# trades)",
+            yaxis_title="Frecuencia",
+        )
+        fig_str2.update_xaxes(dtick=1)
+        st.plotly_chart(fig_str2, use_container_width=True)
+
+    # Tabla resumen de rachas
+    _streak_summary = pd.DataFrame({
+        "Tipo":              ["Ganadoras 🟢", "Perdedoras 🔴"],
+        "Racha Máxima":      [f"{max_win_streak} trades", f"{abs(max_loss_streak)} trades"],
+        "Nº de Rachas":      [len(_win_runs),  len(_loss_runs)],
+        "Avg Longitud":      [f"{np.mean(_win_runs):.1f}"  if _win_runs  else "—",
+                              f"{np.mean(_loss_runs):.1f}" if _loss_runs else "—"],
+        "Rachas de 1":       [_win_runs.count(1),  _loss_runs.count(1)],
+        "Rachas de 2+":      [sum(1 for r in _win_runs  if r >= 2),
+                              sum(1 for r in _loss_runs if r >= 2)],
+        "Rachas de 5+":      [sum(1 for r in _win_runs  if r >= 5),
+                              sum(1 for r in _loss_runs if r >= 5)],
+    })
+    st.dataframe(_streak_summary, use_container_width=True, hide_index=True)
+
 
 # ── TAB 6: Por Ticker ─────────────────────────────────────────────────────────
 with tab6:
@@ -1569,6 +1708,10 @@ with tab7:
         "pnl","Return","MAE","mae_pct","MFE","mfe_pct",
         "rvol_daily","volume","entry_volume",
     ]
+    if "market_cap" in df.columns:
+        parquet_cols.append("market_cap")
+    if "float" in df.columns:
+        parquet_cols.append("float")
     # ── Computed by dashboard ─────────────────────────────────────────────────
     computed_cols = ["pct_from_pdc","shares","gross_pnl","commission","scaled_pnl","winner","hold_h"]
 
@@ -1603,9 +1746,14 @@ with tab7:
         "pct_from_pdc":"PDC→Entry%","shares":"Shares",
         "gross_pnl":"Gross($)","commission":"Comm($)","scaled_pnl":"Net PnL($)",
         "winner":"Win","hold_h":"Hold(h)",
+        "market_cap":"MktCap($M)","float":"Float(M sh)",
     })
     # Ret% is stored as decimal in parquet → display as %
     disp["Ret%"] = (disp["Ret%"] * 100).round(2)
+    if "MktCap($M)" in disp.columns:
+        disp["MktCap($M)"] = (disp["MktCap($M)"] / 1e6).round(1)
+    if "Float(M sh)" in disp.columns:
+        disp["Float(M sh)"] = (disp["Float(M sh)"] / 1e6).round(2)
 
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
@@ -2028,3 +2176,359 @@ with tab9:
             ck6.metric("Sharpe",        f"{_csh:.2f}")
             ck7.metric("Max DD",        f"{all_t['drawdown_pct'].min():.1f}%")
             ck8.metric("Comisiones",    f"${all_t['commission'].sum():,.2f}")
+
+
+# ── TAB 10: Market Cap & Float ────────────────────────────────────────────────
+with tab10:
+    _mkcap_avail = "market_cap" in df.columns and df["market_cap"].notna().any()
+    _float_avail = "float"      in df.columns and df["float"].notna().any()
+
+    if not _mkcap_avail and not _float_avail:
+        st.info(
+            "Este archivo no contiene columnas `market_cap` o `float`.  \n"
+            "Ejecuta el backtest incremental para que los trades se enriquezcan "
+            "automáticamente con datos fundamentales."
+        )
+        st.stop()
+
+    st.markdown("### 🏦 Análisis por Market Cap & Float")
+
+    # ── Coverage KPIs ─────────────────────────────────────────────────────────
+    cov1, cov2, cov3, cov4 = st.columns(4)
+    if _mkcap_avail:
+        cov1.metric("Cobertura Market Cap", f"{df['market_cap'].notna().mean()*100:.1f}%")
+        cov2.metric("Market Cap Mediana",   f"${df['market_cap'].median()/1e6:.1f}M")
+    if _float_avail:
+        cov3.metric("Cobertura Float",  f"{df['float'].notna().mean()*100:.1f}%")
+        cov4.metric("Float Mediano",    f"{df['float'].median()/1e6:.2f}M shares")
+
+    df_fund = df[df["market_cap"].notna() | df["float"].notna()].copy() if (_mkcap_avail or _float_avail) else df.copy()
+
+    # ── Buckets ───────────────────────────────────────────────────────────────
+    if _mkcap_avail:
+        df_fund["mkcap_M"] = df_fund["market_cap"] / 1e6
+        df_fund["mkcap_bucket"] = pd.cut(
+            df_fund["mkcap_M"],
+            bins=[0, 50, 300, 2000, 1e9],
+            labels=["Nano (<$50M)", "Micro ($50-300M)", "Small ($300M-2B)", "Mid+ (>$2B)"],
+            right=False,
+        )
+    if _float_avail:
+        df_fund["float_M"] = df_fund["float"] / 1e6
+        df_fund["float_bucket"] = pd.cut(
+            df_fund["float_M"],
+            bins=[0, 5, 20, 50, 1e9],
+            labels=["Ultra Low (<5M)", "Low (5-20M)", "Mid (20-50M)", "High (>50M)"],
+            right=False,
+        )
+
+    st.divider()
+
+    # ── Market Cap section ────────────────────────────────────────────────────
+    if _mkcap_avail:
+        st.markdown("#### 📊 Rendimiento por Market Cap")
+
+        mkcap_agg = (
+            df_fund.groupby("mkcap_bucket", observed=True)
+            .agg(
+                trades   =("scaled_pnl", "count"),
+                net_pnl  =("scaled_pnl", "sum"),
+                win_rate =("winner",     "mean"),
+                avg_pnl  =("scaled_pnl", "mean"),
+                pf_val   =("scaled_pnl", pf),
+                med_mkcap=("mkcap_M",    "median"),
+            )
+            .reset_index()
+        )
+        mkcap_agg["wr_pct"] = mkcap_agg["win_rate"] * 100
+        mkcap_agg["pf_val"] = mkcap_agg["pf_val"].clip(0, 20)
+
+        mc_col1, mc_col2 = st.columns(2)
+
+        with mc_col1:
+            fig_mc1 = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_mc1.add_trace(go.Bar(
+                x=mkcap_agg["mkcap_bucket"].astype(str),
+                y=mkcap_agg["net_pnl"],
+                marker_color=[GREEN if v >= 0 else RED for v in mkcap_agg["net_pnl"]],
+                name="Net PnL ($)",
+                text=[fmt_dollar(v) for v in mkcap_agg["net_pnl"]],
+                textposition="outside",
+            ), secondary_y=False)
+            fig_mc1.add_trace(go.Scatter(
+                x=mkcap_agg["mkcap_bucket"].astype(str),
+                y=mkcap_agg["wr_pct"],
+                mode="lines+markers",
+                line=dict(color=YELLOW, width=2),
+                marker=dict(size=8),
+                name="Win Rate %",
+            ), secondary_y=True)
+            fig_mc1.add_hline(y=50, line_dash="dash", line_color=YELLOW,
+                              opacity=0.4, secondary_y=True)
+            fig_mc1.update_layout(**PLOTLY_LAYOUT, height=360,
+                                  title="Net PnL y Win Rate por Market Cap")
+            fig_mc1.update_yaxes(title_text="Net PnL ($)", secondary_y=False, gridcolor="#2e3547")
+            fig_mc1.update_yaxes(title_text="Win Rate (%)", secondary_y=True,
+                                  range=[0, 100], gridcolor="rgba(0,0,0,0)",
+                                  tickfont=dict(color=YELLOW))
+            st.plotly_chart(fig_mc1, use_container_width=True)
+
+        with mc_col2:
+            fig_mc2 = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_mc2.add_trace(go.Bar(
+                x=mkcap_agg["mkcap_bucket"].astype(str),
+                y=mkcap_agg["trades"],
+                marker_color=BLUE, opacity=0.7, name="# Trades",
+            ), secondary_y=False)
+            fig_mc2.add_trace(go.Scatter(
+                x=mkcap_agg["mkcap_bucket"].astype(str),
+                y=mkcap_agg["pf_val"],
+                mode="lines+markers",
+                line=dict(color=PURPLE, width=2), marker=dict(size=8),
+                name="Profit Factor",
+            ), secondary_y=True)
+            fig_mc2.add_hline(y=1.0, line_dash="dash", line_color=SUB,
+                              opacity=0.6, secondary_y=True)
+            fig_mc2.update_layout(**PLOTLY_LAYOUT, height=360,
+                                  title="Trades y Profit Factor por Market Cap")
+            fig_mc2.update_yaxes(title_text="# Trades", secondary_y=False, gridcolor="#2e3547")
+            fig_mc2.update_yaxes(title_text="Profit Factor", secondary_y=True,
+                                  gridcolor="rgba(0,0,0,0)", tickfont=dict(color=PURPLE))
+            st.plotly_chart(fig_mc2, use_container_width=True)
+
+        # Scatter: market cap vs Return%
+        _samp_mc = df_fund[df_fund["mkcap_M"].notna()].sample(
+            min(3000, df_fund["mkcap_M"].notna().sum()), random_state=42
+        )
+        _p98_mc = _samp_mc["mkcap_M"].quantile(0.98)
+        fig_mc3 = go.Figure()
+        for win, color, name in [(True, GREEN, "Winner"), (False, RED, "Loser")]:
+            s = _samp_mc[_samp_mc["winner"] == win]
+            fig_mc3.add_trace(go.Scatter(
+                x=s["mkcap_M"].clip(upper=_p98_mc),
+                y=(s["Return"] * 100).clip(-100, 200),
+                mode="markers",
+                marker=dict(color=color, size=4, opacity=0.3),
+                name=name,
+            ))
+        fig_mc3.add_hline(y=0, line_color=SUB, line_dash="dot")
+        fig_mc3.update_layout(**PLOTLY_LAYOUT, height=320,
+                              title="Market Cap ($M) vs Return % por Trade",
+                              xaxis_title="Market Cap ($M, capped P98)",
+                              yaxis_title="Return % (capped ±200)")
+        st.plotly_chart(fig_mc3, use_container_width=True)
+
+        # Box plot winners vs losers
+        fig_mc4 = go.Figure()
+        for win, color, name in [(True, GREEN, "Winners"), (False, RED, "Losers")]:
+            s = df_fund[df_fund["winner"] == win]["mkcap_M"].dropna()
+            fig_mc4.add_trace(go.Box(
+                y=s.clip(upper=s.quantile(0.95)),
+                name=name, marker_color=color,
+                boxpoints="outliers", line=dict(color=color),
+            ))
+        fig_mc4.update_layout(**PLOTLY_LAYOUT, height=300,
+                              title="Market Cap ($M): Winners vs Losers",
+                              yaxis_title="Market Cap ($M, capped P95)")
+        st.plotly_chart(fig_mc4, use_container_width=True)
+
+        st.markdown("#### Tabla por Market Cap")
+        _mc_tbl = mkcap_agg[["mkcap_bucket","trades","net_pnl","wr_pct","avg_pnl","pf_val","med_mkcap"]].copy()
+        _mc_tbl["net_pnl"]   = _mc_tbl["net_pnl"].map(fmt_dollar)
+        _mc_tbl["avg_pnl"]   = _mc_tbl["avg_pnl"].map(fmt_dollar)
+        _mc_tbl["wr_pct"]    = _mc_tbl["wr_pct"].map(lambda x: f"{x:.1f}%")
+        _mc_tbl["pf_val"]    = _mc_tbl["pf_val"].map(lambda x: f"{x:.2f}")
+        _mc_tbl["med_mkcap"] = _mc_tbl["med_mkcap"].map(lambda x: f"${x:.1f}M")
+        _mc_tbl.columns = ["Bucket", "Trades", "Net PnL", "WR%", "Avg PnL", "PF", "Median MktCap"]
+        st.dataframe(_mc_tbl, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Float section ─────────────────────────────────────────────────────────
+    if _float_avail:
+        st.markdown("#### 📊 Rendimiento por Float")
+
+        float_agg = (
+            df_fund.groupby("float_bucket", observed=True)
+            .agg(
+                trades    =("scaled_pnl", "count"),
+                net_pnl   =("scaled_pnl", "sum"),
+                win_rate  =("winner",     "mean"),
+                avg_pnl   =("scaled_pnl", "mean"),
+                pf_val    =("scaled_pnl", pf),
+                med_float =("float_M",    "median"),
+            )
+            .reset_index()
+        )
+        float_agg["wr_pct"] = float_agg["win_rate"] * 100
+        float_agg["pf_val"] = float_agg["pf_val"].clip(0, 20)
+
+        fl_col1, fl_col2 = st.columns(2)
+
+        with fl_col1:
+            fig_fl1 = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_fl1.add_trace(go.Bar(
+                x=float_agg["float_bucket"].astype(str),
+                y=float_agg["net_pnl"],
+                marker_color=[GREEN if v >= 0 else RED for v in float_agg["net_pnl"]],
+                name="Net PnL ($)",
+                text=[fmt_dollar(v) for v in float_agg["net_pnl"]],
+                textposition="outside",
+            ), secondary_y=False)
+            fig_fl1.add_trace(go.Scatter(
+                x=float_agg["float_bucket"].astype(str),
+                y=float_agg["wr_pct"],
+                mode="lines+markers",
+                line=dict(color=YELLOW, width=2), marker=dict(size=8),
+                name="Win Rate %",
+            ), secondary_y=True)
+            fig_fl1.add_hline(y=50, line_dash="dash", line_color=YELLOW,
+                              opacity=0.4, secondary_y=True)
+            fig_fl1.update_layout(**PLOTLY_LAYOUT, height=360,
+                                  title="Net PnL y Win Rate por Float")
+            fig_fl1.update_yaxes(title_text="Net PnL ($)", secondary_y=False, gridcolor="#2e3547")
+            fig_fl1.update_yaxes(title_text="Win Rate (%)", secondary_y=True,
+                                  range=[0, 100], gridcolor="rgba(0,0,0,0)",
+                                  tickfont=dict(color=YELLOW))
+            st.plotly_chart(fig_fl1, use_container_width=True)
+
+        with fl_col2:
+            fig_fl2 = go.Figure()
+            for win, color, name in [(True, GREEN, "Winners"), (False, RED, "Losers")]:
+                s = df_fund[df_fund["winner"] == win]["float_M"].dropna()
+                fig_fl2.add_trace(go.Box(
+                    y=s.clip(upper=s.quantile(0.95)),
+                    name=name, marker_color=color,
+                    boxpoints="outliers", line=dict(color=color),
+                ))
+            fig_fl2.update_layout(**PLOTLY_LAYOUT, height=360,
+                                  title="Float (M shares): Winners vs Losers",
+                                  yaxis_title="Float (M shares, capped P95)")
+            st.plotly_chart(fig_fl2, use_container_width=True)
+
+        # Scatter: float vs Return%
+        _samp_fl = df_fund[df_fund["float_M"].notna()].sample(
+            min(3000, df_fund["float_M"].notna().sum()), random_state=42
+        )
+        _p98_fl = _samp_fl["float_M"].quantile(0.98)
+        fig_fl3 = go.Figure()
+        for win, color, name in [(True, GREEN, "Winner"), (False, RED, "Loser")]:
+            s = _samp_fl[_samp_fl["winner"] == win]
+            fig_fl3.add_trace(go.Scatter(
+                x=s["float_M"].clip(upper=_p98_fl),
+                y=(s["Return"] * 100).clip(-100, 200),
+                mode="markers",
+                marker=dict(color=color, size=4, opacity=0.3),
+                name=name,
+            ))
+        fig_fl3.add_hline(y=0, line_color=SUB, line_dash="dot")
+        fig_fl3.update_layout(**PLOTLY_LAYOUT, height=320,
+                              title="Float (M shares) vs Return % por Trade",
+                              xaxis_title="Float (M shares, capped P98)",
+                              yaxis_title="Return % (capped ±200)")
+        st.plotly_chart(fig_fl3, use_container_width=True)
+
+        st.markdown("#### Tabla por Float")
+        _fl_tbl = float_agg[["float_bucket","trades","net_pnl","wr_pct","avg_pnl","pf_val","med_float"]].copy()
+        _fl_tbl["net_pnl"]   = _fl_tbl["net_pnl"].map(fmt_dollar)
+        _fl_tbl["avg_pnl"]   = _fl_tbl["avg_pnl"].map(fmt_dollar)
+        _fl_tbl["wr_pct"]    = _fl_tbl["wr_pct"].map(lambda x: f"{x:.1f}%")
+        _fl_tbl["pf_val"]    = _fl_tbl["pf_val"].map(lambda x: f"{x:.2f}")
+        _fl_tbl["med_float"] = _fl_tbl["med_float"].map(lambda x: f"{x:.2f}M")
+        _fl_tbl.columns = ["Bucket", "Trades", "Net PnL", "WR%", "Avg PnL", "PF", "Median Float"]
+        st.dataframe(_fl_tbl, use_container_width=True, hide_index=True)
+
+    # ── Combined: heatmap + scatter 2D ────────────────────────────────────────
+    if _mkcap_avail and _float_avail:
+        st.divider()
+        st.markdown("#### 🗺️ Heatmap: Market Cap × Float")
+
+        _hm_metric = st.radio(
+            "Métrica del heatmap",
+            ["Net PnL ($)", "Win Rate (%)", "Profit Factor"],
+            horizontal=True,
+            key="hm_metric_fund",
+        )
+        _df_hm = df_fund.dropna(subset=["mkcap_bucket", "float_bucket"])
+
+        if not _df_hm.empty:
+            if _hm_metric == "Net PnL ($)":
+                hm_vals = _df_hm.groupby(
+                    ["mkcap_bucket", "float_bucket"], observed=True
+                )["scaled_pnl"].sum().unstack(fill_value=0)
+                _zmid = 0
+                _cscale = [[0, RED], [0.5, CARD], [1, GREEN]]
+            elif _hm_metric == "Win Rate (%)":
+                hm_vals = (
+                    _df_hm.groupby(["mkcap_bucket", "float_bucket"], observed=True)["winner"]
+                    .mean().unstack(fill_value=float("nan")) * 100
+                )
+                _zmid = 50
+                _cscale = [[0, RED], [0.5, YELLOW], [1, GREEN]]
+            else:
+                def _pf_hm(x):
+                    w = x[x > 0].sum(); l = abs(x[x < 0].sum())
+                    return w / l if l > 0 else float("nan")
+                hm_vals = (
+                    _df_hm.groupby(["mkcap_bucket", "float_bucket"], observed=True)["scaled_pnl"]
+                    .apply(_pf_hm).unstack(fill_value=float("nan"))
+                )
+                _zmid = 1
+                _cscale = [[0, RED], [0.5, YELLOW], [1, GREEN]]
+
+            fig_hm = go.Figure(go.Heatmap(
+                z=hm_vals.values,
+                x=[str(c) for c in hm_vals.columns],
+                y=[str(r) for r in hm_vals.index],
+                colorscale=_cscale,
+                zmid=_zmid,
+                text=np.round(hm_vals.values, 1),
+                texttemplate="%{text}",
+                textfont=dict(size=10),
+                colorbar=dict(title=_hm_metric),
+            ))
+            fig_hm.update_layout(
+                **PLOTLY_LAYOUT, height=300,
+                title=f"Heatmap {_hm_metric}: Market Cap × Float",
+                xaxis_title="Float Bucket",
+                yaxis_title="Market Cap Bucket",
+            )
+            st.plotly_chart(fig_hm, use_container_width=True)
+
+        # 2D Scatter: float vs market_cap, color = Net PnL
+        st.markdown("#### Scatter: Float vs Market Cap (color = Net PnL)")
+        _df_2d = df_fund.dropna(subset=["mkcap_M", "float_M"])
+        if not _df_2d.empty:
+            _df_2d = _df_2d.sample(min(2000, len(_df_2d)), random_state=42)
+            _p98_mc2 = _df_2d["mkcap_M"].quantile(0.98)
+            _p98_fl2 = _df_2d["float_M"].quantile(0.98)
+            _df_2d = _df_2d[(_df_2d["mkcap_M"] <= _p98_mc2) & (_df_2d["float_M"] <= _p98_fl2)]
+
+            fig_2d = go.Figure(go.Scatter(
+                x=_df_2d["float_M"],
+                y=_df_2d["mkcap_M"],
+                mode="markers",
+                marker=dict(
+                    color=_df_2d["scaled_pnl"],
+                    colorscale=[[0, RED], [0.5, "#1a1d27"], [1, GREEN]],
+                    cmid=0,
+                    size=6, opacity=0.5,
+                    colorbar=dict(title="Net PnL ($)"),
+                    showscale=True,
+                ),
+                text=_df_2d["ticker"],
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "Float: %{x:.1f}M sh<br>"
+                    "MktCap: $%{y:.1f}M<br>"
+                    "PnL: $%{marker.color:.2f}"
+                    "<extra></extra>"
+                ),
+            ))
+            fig_2d.update_layout(
+                **PLOTLY_LAYOUT, height=420,
+                title="Float (M shares) vs Market Cap ($M) — color = Net PnL por trade",
+                xaxis_title="Float (M shares, capped P98)",
+                yaxis_title="Market Cap ($M, capped P98)",
+            )
+            st.plotly_chart(fig_2d, use_container_width=True)

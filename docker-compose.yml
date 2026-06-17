@@ -45,6 +45,10 @@ services:
       ofelia.job-exec.update-indices-dataset.command: >-
         python -m scripts.update_indices_dataset
       ofelia.job-exec.update-indices-dataset.save-folder: /logs
+      ofelia.job-exec.update-stock-dataset.schedule: "0 30 21 * * 1-5"
+      ofelia.job-exec.update-stock-dataset.command: >-
+        python -c "from scripts.update_stock_dataset import run_incremental_stock_dataset_update; run_incremental_stock_dataset_update()"
+      ofelia.job-exec.update-stock-dataset.save-folder: /logs
 
   # ── Backtest Dashboard — Streamlit ──────────────────────────────────────────
   dashboard:

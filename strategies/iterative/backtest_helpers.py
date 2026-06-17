@@ -8,11 +8,13 @@ import functools
 import time as tm
 from pathlib import Path
 
+import httpx
 import pandas as pd
 import webbrowser
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from app.config import get_settings
 from app.utils.charts import CHARTS_DIR, _write_fullscreen_html
 
 DATASET_ROOT   = Path(os.path.abspath(".")) / "backtest_dataset" / "full"
@@ -247,6 +249,73 @@ def plot_ticker(
     return fig
 
 
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _fetch_reference_sync(
+    client: httpx.Client,
+    base: str,
+    api_key: str,
+    ticker: str,
+    date_str: str,
+    retries: int = 3,
+) -> dict | None:
+    url = f"{base}/v3/reference/tickers/{ticker}?date={date_str}&apiKey={api_key}"
+    for attempt in range(retries + 1):
+        try:
+            resp = client.get(url)
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt == retries:
+                return None
+            tm.sleep(min(0.5 * 2 ** attempt, 10))
+            continue
+        if resp.status_code == 200:
+            return resp.json().get("results")
+        if resp.status_code in _RETRY_STATUS and attempt < retries:
+            tm.sleep(min(0.5 * 2 ** attempt, 10))
+            continue
+        return None
+    return None
+
+
+def _enrich_trades_with_fundamentals(trades: pd.DataFrame) -> pd.DataFrame:
+    """Attach market_cap and float to trades via the Massive reference endpoint."""
+    if trades.empty or "ticker" not in trades.columns or "date_str" not in trades.columns:
+        return trades
+
+    settings = get_settings()
+    if not settings.massive_api_key:
+        logger.warning("MASSIVE_API_KEY no configurado — omitiendo enriquecimiento de fundamentals.")
+        return trades
+
+    base = settings.massive_base_url.rstrip("/")
+    api_key = settings.massive_api_key
+
+    pairs = trades[["ticker", "date_str"]].drop_duplicates()
+    rows = []
+    with httpx.Client(timeout=30) as client:
+        for _, row in pairs.iterrows():
+            res = _fetch_reference_sync(client, base, api_key, row["ticker"], row["date_str"])
+            if res:
+                rows.append({
+                    "ticker":      row["ticker"],
+                    "date_str":    row["date_str"],
+                    "market_cap":  res.get("market_cap"),
+                    "float":       res.get("weighted_shares_outstanding"),
+                })
+
+    if not rows:
+        logger.warning("_enrich_trades_with_fundamentals: no se obtuvo ningún dato de fundamentals.")
+        return trades
+
+    lookup = pd.DataFrame(rows)
+    trades = trades.drop(columns=["market_cap", "float"], errors="ignore")
+    enriched = trades.merge(lookup, on=["ticker", "date_str"], how="left")
+    matched = enriched["market_cap"].notna().sum()
+    logger.info("Fundamentals enriquecidos: %d/%d trades con market_cap.", matched, len(enriched))
+    return enriched
+
+
 def run_backtest(
     timeframe: str,
     strategy_func=None,
@@ -383,6 +452,7 @@ def run_backtest(
 
         if day_trades:
             day_result = pd.concat(day_trades, ignore_index=True)
+            day_result = _enrich_trades_with_fundamentals(day_result)
             _append_trades(day_result)
             total_trades_session += len(day_result)
             logger.info("[%d/%d] %s  tickers=%d  trades=%d", idx, total_dates, day_str, n_tickers, len(day_result))

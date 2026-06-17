@@ -35,4 +35,5 @@ logs/
 backtest_dataset/
 strategies/iterative/UP-TO-DATE/
 strategies/iterative/WF/
+*.parquet
 

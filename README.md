@@ -439,6 +439,9 @@ Notes: prices are **unadjusted** (6-decimal precision); `volume` is kept fractio
 
 ## Iterative strategies
 
+> **Strategy Registry spec:** [`strategies/iterative/STRATEGY_REGISTRY_SPEC.md`](strategies/iterative/STRATEGY_REGISTRY_SPEC.md)
+> — defines the full entry schema, dataset routing rules, and how to add a new strategy.
+
 ### `strategies/iterative/small_caps.py`
 
 Intraday strategies for small-cap gappers. Each function receives one day of 5m or 15m candles for one ticker and returns a `pd.DataFrame` of trades. Registered strategies:
@@ -449,6 +452,27 @@ Intraday strategies for small-cap gappers. Each function receives one day of 5m 
 | `gap_crap_iterative` | Short at 9:25 close if gapped ≥ 40 % over prior close |
 | `short_push_exhaustion_iterative` | Red bar with dominant topping tail, vol surge, above VWAP |
 | `push_rejection_iterative` | Red bar crossing VWAP downward with body > bottom tail |
+
+### `strategies/iterative/orb_avg_range.py`
+
+Opening Range Breakout strategies for indices (`dataset: "indices"`).
+
+| Function | Signal |
+|---|---|
+| `orb_avg_range_iterative` | Breakout above / breakdown below the 9–10 am range, with TP projected by the 10-day average daily range |
+
+#### `orb_avg_range_iterative`
+
+Opening range = 9:00–10:00 am ET (precomputed as `h1_9am_high` / `h1_9am_low`). Signals fire from 10:00 am onward. One trade per day, one unit.
+
+| | Long | Short |
+|---|---|---|
+| **Signal** | close > `h1_9am_high` | close < `h1_9am_low` |
+| **Entry** | next-bar open | next-bar open |
+| **TP** | `h1_9am_low + daily_range_ma10` | `h1_9am_high - daily_range_ma10` |
+| **SL** | `h1_9am_low` | `h1_9am_high` |
+
+---
 
 ### `strategies/iterative/trend_following.py`
 
@@ -468,6 +492,69 @@ Historical daily indicators (EMA100, ATR14, 20-day high/low) are computed from t
 
 ```python
 from strategies.iterative.trend_following import ema100_trend_follower_iterative
+```
+
+---
+
+### Running backtests manually
+
+All commands run from the project root (`backtester_api/`).
+
+#### Up-to-date backtest — full historical dataset
+
+Runs every strategy in the registry against its full dataset. Small-caps strategies use
+`backtest_dataset/full/{tf}/dates/`; indices strategies use `backtest_dataset/INDICES/{ticker}/{tf}/`.
+
+```bash
+# All strategies, all dates
+.venv/bin/python3 -c "
+from strategies.iterative.backtest_helpers import run_up_to_date_backtest
+run_up_to_date_backtest()
+"
+
+# Restrict to a date range
+.venv/bin/python3 -c "
+from strategies.iterative.backtest_helpers import run_up_to_date_backtest
+run_up_to_date_backtest(from_date='2024-01-01', to_date='2024-12-31')
+"
+```
+
+Output: `strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}/{out_put_name}.parquet` (small caps)
+and `strategies/iterative/UP-TO-DATE/INDICES/{tf}/{out_put_name}/{out_put_name}.parquet` (indices).
+
+#### Walk-forward backtest
+
+Runs small-caps strategies across all IS/OOS folds (`backtest_dataset/walkforward/`).
+Index strategies are skipped automatically.
+
+```bash
+.venv/bin/python3 -c "
+from strategies.iterative.backtest_helpers import run_walkforward_backtest
+run_walkforward_backtest()
+"
+```
+
+Output: `strategies/iterative/WF/{IN-SAMPLE,OUT-OF-SAMPLE}/{tf}/tier_{1,2,3}/{out_put_name}/`.
+
+#### Incremental backtest
+
+Runs small-caps strategies only on the pending dates written by `update_full_dataset.py`
+(`backtest_dataset/pending_candles_{5m,15m}.parquet`). Used by the nightly cron job.
+
+```bash
+.venv/bin/python3 -c "
+from strategies.iterative.backtest_helpers import run_iterative_incremental_backtest
+run_iterative_incremental_backtest()
+"
+```
+
+#### Run a single strategy directly
+
+Each strategy module has a `__main__` block for quick standalone runs:
+
+```bash
+.venv/bin/python3 -m strategies.iterative.orb_avg_range
+.venv/bin/python3 -m strategies.iterative.trend_following
 ```
 
 ---

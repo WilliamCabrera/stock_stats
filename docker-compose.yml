@@ -29,19 +29,19 @@ services:
           memory: 4G
     labels:
       ofelia.enabled: "true"
-      ofelia.job-exec.incremental-pipeline.schedule: "0 30 20 * * *"
+      ofelia.job-exec.incremental-pipeline.schedule: "0 30 20 * * 1-5"
       ofelia.job-exec.incremental-pipeline.command: >-
         python -c "from app.utils.pipeline_data_collection import run_incremental_v1; run_incremental_v1()"
       ofelia.job-exec.incremental-pipeline.save-folder: /logs
-      ofelia.job-exec.update-full-dataset.schedule: "0 0 2 * * *"
+      ofelia.job-exec.update-full-dataset.schedule: "0 0 2 * * 1-5"
       ofelia.job-exec.update-full-dataset.command: >-
         python -m scripts.update_full_dataset
       ofelia.job-exec.update-full-dataset.save-folder: /logs
-      ofelia.job-exec.incremental-backtest.schedule: "0 0 4 * * *"
+      ofelia.job-exec.incremental-backtest.schedule: "0 0 4 * * 1-5"
       ofelia.job-exec.incremental-backtest.command: >-
         python -c "from strategies.iterative.backtest_helpers import run_iterative_incremental_backtest; run_iterative_incremental_backtest()"
       ofelia.job-exec.incremental-backtest.save-folder: /logs
-      ofelia.job-exec.update-indices-dataset.schedule: "0 0 22 * * *"
+      ofelia.job-exec.update-indices-dataset.schedule: "0 30 23 * * 1-5"
       ofelia.job-exec.update-indices-dataset.command: >-
         python -m scripts.update_indices_dataset
       ofelia.job-exec.update-indices-dataset.save-folder: /logs
@@ -83,6 +83,19 @@ services:
     restart: unless-stopped
     ports:
       - "8503:8503"
+    env_file: .env
+    environment:
+      TZ: America/New_York
+    volumes:
+      - .:/app
+
+  # ── Indices Dashboard — Streamlit ───────────────────────────────────────────
+  indices-dashboard:
+    build: .
+    command: streamlit run strategies/dashboard_indices.py --server.port 8504 --server.address 0.0.0.0
+    restart: unless-stopped
+    ports:
+      - "8504:8504"
     env_file: .env
     environment:
       TZ: America/New_York

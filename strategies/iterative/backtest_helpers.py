@@ -361,8 +361,8 @@ def run_backtest(
 
     _out_dir = Path(out_dir) if out_dir is not None else DATASET_ROOT_1 / "UP-TO-DATE" / timeframe / strategy_name
     _out_dir.mkdir(parents=True, exist_ok=True)
-    out_path        = _out_dir / f"{out_put_name}.parquet"
-    checkpoint_path = _out_dir / f"{out_put_name}_checkpoint.json"
+    out_path        = _out_dir / f"{out_put_name}_{timeframe}.parquet"
+    checkpoint_path = _out_dir / f"{out_put_name}_{timeframe}_checkpoint.json"
 
     logger.info("run_backtest  strategy=%s  tf=%s  params=%s  out=%s", strategy_name, timeframe, out_put_name, _out_dir)
 
@@ -430,9 +430,14 @@ def run_backtest(
         n_tickers = day_df["ticker"].nunique()
         day_trades: list[pd.DataFrame] = []
 
+        expected_delta = pd.Timedelta(minutes=tf_minutes)
         for ticker in day_df["ticker"].unique():
             candles = day_df[day_df["ticker"] == ticker].copy().reset_index(drop=True)
             if len(candles) < 2:
+                continue
+            rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
+            if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
+                logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
                 continue
             try:
                 trades = strategy_func(
@@ -502,6 +507,17 @@ def run_walkforward_backtest(from_date: str | None = None, to_date: str | None =
     for entry in _strategies:
         strategy_func = entry["strategy_func"]
         strategy_name = entry["strategy_name"]
+        dataset       = entry.get("dataset", "small_caps")
+
+        if dataset == "indices":
+            for p in entry["params"]:
+                logger.info("WF  strategy=%s  dataset=indices  params=%s", strategy_name, p["out_put_name"])
+                _run_indices_walkforward(entry, p, from_date=from_date, to_date=to_date)
+            continue
+
+        if dataset != "small_caps":
+            logger.info("WF  strategy=%s — omitido (dataset=%s)", strategy_name, dataset)
+            continue
 
         for p in entry["params"]:
             slippage     = p["slippage"]
@@ -543,32 +559,31 @@ def run_up_to_date_backtest(from_date: str | None = None, to_date: str | None = 
     _strategies = strategies if strategies is not None else _default_strategies()
 
     for entry in _strategies:
-        strategy_func = entry["strategy_func"]
         strategy_name = entry["strategy_name"]
+        dataset       = entry.get("dataset", "small_caps")
 
         for p in entry["params"]:
-            slippage     = p["slippage"]
-            gap_pct      = p["gap_pct"]
-            stop_pct     = p["stop_pct"]
-            tp_pct       = p["tp_pct"]
             out_put_name = p["out_put_name"]
+            logger.info("UP-TO-DATE  strategy=%s  dataset=%s  params=%s", strategy_name, dataset, out_put_name)
 
-            logger.info("UP-TO-DATE  strategy=%s  params=%s", strategy_name, out_put_name)
-
-            for tf in ["5m", "15m"]:
-                run_backtest(
-                    timeframe=tf,
-                    strategy_func=strategy_func,
-                    from_date=from_date,
-                    to_date=to_date,
-                    slippage=slippage,
-                    gap_pct=gap_pct,
-                    stop_pct=stop_pct,
-                    tp_pct=tp_pct,
-                    dates_dir=f"backtest_dataset/full/{tf}/dates",
-                    out_dir=f"strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}",
-                    out_put_name=out_put_name,
-                )
+            if dataset == "indices":
+                _run_indices_uptodate(entry, p, from_date=from_date, to_date=to_date)
+            else:
+                strategy_func = entry["strategy_func"]
+                for tf in ["5m", "15m"]:
+                    run_backtest(
+                        timeframe=tf,
+                        strategy_func=strategy_func,
+                        from_date=from_date,
+                        to_date=to_date,
+                        slippage=p["slippage"],
+                        gap_pct=p["gap_pct"],
+                        stop_pct=p["stop_pct"],
+                        tp_pct=p["tp_pct"],
+                        dates_dir=f"backtest_dataset/full/{tf}/dates",
+                        out_dir=f"strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}",
+                        out_put_name=out_put_name,
+                    )
 
     logger.info("run_up_to_date_backtest completado en %.2fs", tm.time() - _t0)
 
@@ -577,15 +592,18 @@ def run_iterative_incremental_backtest(strategies: list | None = None):
     """
     Incremental iterative backtest driven by STRATEGIES registry.
 
-    For every entry in STRATEGIES, and for every params set in entry["params"],
-    runs run_backtest on the pending dates for both 5m and 15m timeframes.
+    Covers all datasets declared in the registry:
 
-    Reads pending dates from:
-        backtest_dataset/pending_candles_{5m,15m}.parquet
-    Reads candle data from:
-        backtest_dataset/full/{timeframe}/dates/{YYYY_MM_DD}.parquet
-    Appends trades to (same location as run_up_to_date_backtest):
-        strategies/iterative/UP-TO-DATE/{timeframe}/{out_put_name}/{out_put_name}.parquet
+    small_caps
+        Reads pending dates from backtest_dataset/pending_candles_{5m,15m}.parquet
+        (written by update_full_dataset.py). Clears processed dates on completion.
+        Output: strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}/
+
+    indices
+        Derives new dates by comparing max(date_str) in the existing output parquet
+        against the dates available in backtest_dataset/INDICES/{ticker}/{tf}/.
+        If no output exists yet, bootstraps the full history on first run.
+        Output: strategies/iterative/UP-TO-DATE/INDICES/{tf}/{out_put_name}/
     """
     _t0 = tm.time()
     _strategies = strategies if strategies is not None else _default_strategies()
@@ -595,6 +613,17 @@ def run_iterative_incremental_backtest(strategies: list | None = None):
     for entry in _strategies:
         strategy_func = entry["strategy_func"]
         strategy_name = entry["strategy_name"]
+        dataset       = entry.get("dataset", "small_caps")
+
+        if dataset == "indices":
+            for p in entry["params"]:
+                logger.info("INCREMENTAL  strategy=%s  dataset=indices  params=%s", strategy_name, p["out_put_name"])
+                _run_indices_incremental(entry, p)
+            continue
+
+        if dataset != "small_caps":
+            logger.info("INCREMENTAL  strategy=%s — omitido (dataset=%s)", strategy_name, dataset)
+            continue
 
         for p in entry["params"]:
             slippage     = p["slippage"]
@@ -664,6 +693,298 @@ def run_iterative_incremental_backtest(strategies: list | None = None):
             )
 
     logger.info("run_iterative_incremental_backtest completado en %.2fs", tm.time() - _t0)
+
+
+def _run_indices_walkforward(
+    entry: dict,
+    p: dict,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> None:
+    """
+    Walk-forward backtest for index strategies.
+
+    Reads per-ticker IS/OOS fold parquets from:
+        {data_root}/{ticker}/walkforward/{tf}/fold_{N}/{in_sample,out_of_sample}.parquet
+
+    Passes the full-history parquet as ticker_parquet_path so strategies that
+    need historical context (EMA, ATR) have access to prior days outside the fold.
+
+    Output:
+        strategies/iterative/WF/INDICES/{IN-SAMPLE,OUT-OF-SAMPLE}/{tf}/{tier}/{out_put_name}/
+    """
+    strategy_func = entry["strategy_func"]
+    strategy_name = entry["strategy_name"]
+    data_root     = Path(os.path.abspath(".")) / entry["data_root"]
+    tickers       = entry.get("tickers", [])
+    timeframes    = entry.get("timeframes", ["5m"])
+    out_put_name  = p["out_put_name"]
+
+    FOLDS = [
+        (1, "IN-SAMPLE",     "in_sample",     "tier_1"),
+        (2, "IN-SAMPLE",     "in_sample",     "tier_2"),
+        (3, "IN-SAMPLE",     "in_sample",     "tier_3"),
+        (1, "OUT-OF-SAMPLE", "out_of_sample", "tier_1"),
+        (2, "OUT-OF-SAMPLE", "out_of_sample", "tier_2"),
+        (3, "OUT-OF-SAMPLE", "out_of_sample", "tier_3"),
+    ]
+
+    for tf in timeframes:
+        tf_minutes = int(tf[:-1])
+
+        for fold_n, split, file_stem, tier in FOLDS:
+            out_dir = (
+                Path(os.path.abspath("."))
+                / "strategies" / "iterative" / "WF" / "INDICES"
+                / split / tf / tier / out_put_name
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{out_put_name}_{tf}.parquet"
+
+            for ticker in tickers:
+                fold_parquet = (
+                    data_root / ticker / "walkforward" / tf
+                    / f"fold_{fold_n}" / f"{file_stem}.parquet"
+                )
+                if not fold_parquet.exists():
+                    logger.warning("[INDICES WF] %s  fold_%d/%s  %s — parquet no encontrado: %s",
+                                   ticker, fold_n, file_stem, tf, fold_parquet)
+                    continue
+
+                # Full-history parquet for historical context (EMA, ATR lookbacks, etc.)
+                full_parquet = data_root / ticker / tf / f"{ticker.lower()}_full_dataset.parquet"
+                ticker_parquet_path = full_parquet if full_parquet.exists() else fold_parquet
+
+                fold_df = pd.read_parquet(fold_parquet)
+                if "date_str" not in fold_df.columns:
+                    logger.warning("[INDICES WF] %s fold_%d/%s — columna date_str no encontrada.", ticker, fold_n, file_stem)
+                    continue
+
+                if from_date:
+                    fold_df = fold_df[fold_df["date_str"] >= from_date]
+                if to_date:
+                    fold_df = fold_df[fold_df["date_str"] <= to_date]
+
+                dates = sorted(fold_df["date_str"].unique())
+                if not dates:
+                    continue
+
+                logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  %d fechas",
+                            strategy_name, fold_n, split, tf, ticker, len(dates))
+
+                day_trades: list[pd.DataFrame] = []
+                expected_delta = pd.Timedelta(minutes=tf_minutes)
+                for day_str in dates:
+                    candles = fold_df[fold_df["date_str"] == day_str].copy().reset_index(drop=True)
+                    if len(candles) < 2:
+                        continue
+                    rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
+                    if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
+                        logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
+                        continue
+                    try:
+                        trades = strategy_func(
+                            candles,
+                            gap_pct=p["gap_pct"],
+                            stop_pct=p["stop_pct"],
+                            tp_pct=p["tp_pct"],
+                            slippage=p["slippage"],
+                            timeframe_minutes=tf_minutes,
+                            ticker_parquet_path=ticker_parquet_path,
+                        )
+                    except Exception as e:
+                        logger.warning("[INDICES WF] %-6s  %s — strategy error: %s", ticker, day_str, e)
+                        continue
+                    if trades is not None and not trades.empty:
+                        trades["timeframe"] = tf
+                        day_trades.append(trades)
+
+                if day_trades:
+                    new_df = pd.concat(day_trades, ignore_index=True)
+                    if out_path.exists():
+                        existing = pd.read_parquet(out_path)
+                        combined = pd.concat([existing, new_df], ignore_index=True)
+                        combined = combined.drop_duplicates(
+                            subset=["ticker", "date_str", "entry_time"], keep="last"
+                        )
+                    else:
+                        combined = new_df
+                    combined.to_parquet(out_path, index=False)
+                    logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  → %d trades escritos",
+                                strategy_name, fold_n, split, tf, ticker, len(new_df))
+
+
+def _run_indices_incremental(entry: dict, p: dict) -> None:
+    """
+    Incremental backtest for index strategies.
+
+    Determines which dates are new by comparing max(date_str) in the existing
+    output parquet against the dates available in the ticker's full parquet.
+    Delegates to _run_indices_uptodate with from_date set to the day after the
+    last already-processed date.
+
+    If no output parquet exists yet (first run), processes the full history so
+    the output is bootstrapped and subsequent incremental runs work correctly.
+    """
+    strategy_name = entry["strategy_name"]
+    data_root     = Path(os.path.abspath(".")) / entry["data_root"]
+    timeframes    = entry.get("timeframes", ["5m"])
+    out_put_name  = p["out_put_name"]
+
+    for tf in timeframes:
+        out_path = (
+            Path(os.path.abspath("."))
+            / "strategies" / "iterative" / "UP-TO-DATE" / "INDICES"
+            / tf / out_put_name / f"{out_put_name}_{tf}.parquet"
+        )
+
+        from_date: str | None = None
+
+        if out_path.exists():
+            try:
+                existing  = pd.read_parquet(out_path, columns=["date_str"])
+                last_date = existing["date_str"].max()
+                from_date = (pd.Timestamp(last_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                logger.info("[INDICES INCREMENTAL] %s %s — último date=%s  →  from=%s",
+                            strategy_name, tf, last_date, from_date)
+            except Exception as e:
+                logger.warning("[INDICES INCREMENTAL] %s %s — error leyendo output: %s; corriendo full.", strategy_name, tf, e)
+        else:
+            logger.info("[INDICES INCREMENTAL] %s %s — sin output previo, bootstrapping full history.", strategy_name, tf)
+
+        # Verify there is actually new data before launching
+        tickers = entry.get("tickers", [])
+        has_new = False
+        for ticker in tickers:
+            parquet_path = data_root / ticker / tf / f"{ticker.lower()}_full_dataset.parquet"
+            if not parquet_path.exists():
+                continue
+            dates_available = pd.read_parquet(parquet_path, columns=["date_str"])["date_str"]
+            if from_date is None or (dates_available > from_date).any():
+                has_new = True
+                break
+
+        if not has_new:
+            logger.info("[INDICES INCREMENTAL] %s %s — sin fechas nuevas, skipping.", strategy_name, tf)
+            continue
+
+        _run_indices_uptodate(entry, p, from_date=from_date)
+
+
+def _run_indices_uptodate(
+    entry: dict,
+    p: dict,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> None:
+    """
+    Up-to-date backtest for index strategies.
+
+    Reads per-ticker parquet files from:
+        {data_root}/{ticker}/{tf}/{ticker_lower}_full_dataset.parquet
+
+    Path template comes from entry["data_root"] — nothing is hardcoded here.
+    """
+    strategy_func = entry["strategy_func"]
+    strategy_name = entry["strategy_name"]
+    data_root     = Path(os.path.abspath(".")) / entry["data_root"]
+    tickers       = entry.get("tickers", [])
+    timeframes    = entry.get("timeframes", ["5m"])
+    slippage      = p["slippage"]
+    gap_pct       = p["gap_pct"]
+    stop_pct      = p["stop_pct"]
+    tp_pct        = p["tp_pct"]
+    out_put_name  = p["out_put_name"]
+
+    for tf in timeframes:
+        tf_minutes = int(tf[:-1])
+        out_dir    = Path(os.path.abspath(".")) / "strategies" / "iterative" / "UP-TO-DATE" / "INDICES" / tf / out_put_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path        = out_dir / f"{out_put_name}_{tf}.parquet"
+        checkpoint_path = out_dir / f"{out_put_name}_{tf}_checkpoint.json"
+
+        resume_from: str | None = None
+        if checkpoint_path.exists():
+            try:
+                ck = json.loads(checkpoint_path.read_text())
+                resume_from = ck.get("last_completed_date")
+                logger.info("[INDICES][RESUME] %s %s — continuando desde %s", strategy_name, tf, resume_from)
+            except Exception:
+                pass
+
+        for ticker in tickers:
+            # Path resolved from registry data_root — no dataset logic inside strategy
+            parquet_path = data_root / ticker / tf / f"{ticker.lower()}_full_dataset.parquet"
+            if not parquet_path.exists():
+                logger.warning("[INDICES] %s %s %s — parquet no encontrado: %s", strategy_name, tf, ticker, parquet_path)
+                continue
+
+            full_df = pd.read_parquet(parquet_path)
+            if "date_str" not in full_df.columns:
+                logger.warning("[INDICES] %s %s %s — columna date_str no encontrada.", strategy_name, tf, ticker)
+                continue
+
+            if from_date:
+                full_df = full_df[full_df["date_str"] >= from_date]
+            if to_date:
+                full_df = full_df[full_df["date_str"] <= to_date]
+            if resume_from:
+                full_df = full_df[full_df["date_str"] > resume_from]
+
+            dates = sorted(full_df["date_str"].unique())
+            if not dates:
+                continue
+
+            logger.info("[INDICES] %s  %s  %s  %d fechas", strategy_name, tf, ticker, len(dates))
+            total_session = 0
+
+            expected_delta = pd.Timedelta(minutes=tf_minutes)
+            for day_str in dates:
+                candles = full_df[full_df["date_str"] == day_str].copy().reset_index(drop=True)
+                if len(candles) < 2:
+                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                    continue
+                rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
+                if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
+                    logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
+                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                    continue
+                try:
+                    trades = strategy_func(
+                        candles,
+                        gap_pct=gap_pct,
+                        stop_pct=stop_pct,
+                        tp_pct=tp_pct,
+                        slippage=slippage,
+                        timeframe_minutes=tf_minutes,
+                        # Resolved from registry: runner constructs path, strategy receives it
+                        ticker_parquet_path=parquet_path,
+                    )
+                except Exception as e:
+                    logger.warning("[INDICES] %-6s  %s — strategy error: %s", ticker, day_str, e)
+                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                    continue
+
+                if trades is not None and not trades.empty:
+                    trades["timeframe"] = tf
+                    if out_path.exists():
+                        existing = pd.read_parquet(out_path)
+                        combined = pd.concat([existing, trades], ignore_index=True)
+                        combined = combined.drop_duplicates(
+                            subset=["ticker", "date_str", "entry_time"], keep="last"
+                        )
+                    else:
+                        combined = trades
+                    combined.to_parquet(out_path, index=False)
+                    total_session += len(trades)
+
+                checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+
+            logger.info("[INDICES] %s  %s  %s  session_trades=%d", strategy_name, tf, ticker, total_session)
+
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            logger.info("[INDICES] Checkpoint eliminado — %s %s completo.", strategy_name, tf)
 
 
 def _default_strategies() -> list:

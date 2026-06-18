@@ -561,6 +561,11 @@ def load_and_compute(file_bytes: bytes, initial_capital: float,
     df = pd.read_parquet(io.BytesIO(file_bytes))
     df = df.sort_values("entry_time").reset_index(drop=True)
 
+    # Coerce numeric fields that older parquets may have stored as object dtype
+    for _col in ("rvol_daily", "previous_day_close"):
+        if _col in df.columns and df[_col].dtype == object:
+            df[_col] = pd.to_numeric(df[_col], errors="coerce")
+
     if from_date:
         df = df[df["entry_time"] >= pd.Timestamp(from_date)]
     if to_date:

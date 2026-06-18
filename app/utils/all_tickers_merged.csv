@@ -15150,7 +15150,7 @@ HRSK,Toews Agility Shares Hedged Risk ETF,ARCX
 JCAL,JPMorgan California Tax Free Bond ETF,ARCX
 JTNY,JPMorgan New York Tax Free Bond ETF,ARCX
 LOFF,Direxion Daily SpaceX Bull 2X ETF,ARCX
-NA,Nano Labs Ltd Class A Ordinary Shares,XNAS
+,Nano Labs Ltd Class A Ordinary Shares,XNAS
 SLBT,SL Science Holding Limited Ordinary Shares,XNAS
 SNK,GraniteShares 2x Short SpaceX Daily ETF,BATS
 SPAL,GraniteShares 2x Long SpaceX Daily ETF,BATS
@@ -15164,3 +15164,32 @@ SPCU,Defiance Daily Target 2X Long SpaceX ETF,BATS
 SSPC,Leverage Shares 2X Short SPCX Daily ETF,BATS
 TILC,Thrivent International Large Cap ETF,XNAS
 TISC,Thrivent International Small Cap ETF,XNAS
+,Nano Labs Ltd Class A Ordinary Shares,XNAS
+ACOM,Harbor Active Commodity ETF,ARCX
+ADIU,Leverage Shares 2X Long ADI Daily ETF,BATS
+APHG,Leverage Shares 2X Long APH Daily ETF,BATS
+AXTL,Leverage Shares 2X Long AXTI Daily ETF,BATS
+BITA,The iShares Bitcoin Premium Income ETF Shares of Fractional Undivided Beneficial Interest,XNAS
+BMNP,"BitMine Immersion Technologies, Inc. 9.5% Series A Perpetual Preferred Stock",XNYS
+CAES,"Cantor Equity Partners VII, Inc. Class A Ordinary Shares",XNAS
+CTGG,Qwest Corporation 6.500% Senior Notes due 2051 (denominations of $25),XNYS
+CTHH,Qwest Corporation 6.750% Senior Notes due 2052 (denominations of $25),XNYS
+CXII,Churchill Capital Corp XII Class A Ordinary Shares,XNAS
+CXIIW,Churchill Capital Corp XII Warrants,XNAS
+FCBM,"First Carolina Financial Services, Inc.",XNYS
+FHIL,Federated Hermes International Leaders ETF,BATS
+FLZH,"Flash Sports & Media Holdings, Inc. Common Stock",XNAS
+FNG,Leverage Shares 2X Long FN Daily ETF,BATS
+FTH,"Faeth Therapeutics, Inc. Common Stock",XNAS
+KAZR,Skyline Builders Group Holding Limited Class A Ordinary Shares,XNAS
+KEYG,Leverage Shares 2X Long KEYS Daily ETF,BATS
+LILAP,Liberty Latin America Ltd. 9.0% Fixed Rate Cumulative Perpetual Redeemable Series A Preference Shares,XNAS
+MCHG,Leverage Shares 2X Long MCHP Daily ETF,BATS
+NA,Nano Labs Ltd Class A Ordinary Shares,XNAS
+RQIrw,"Cohen & Steers Quality Income Realty Fund, Inc. Rights (expiring July 15, 2026)",XNYS
+SMCIP,"Super Micro Computer, Inc. Depositary Shares representing a 1/20th Interest in a Share of 7% Series A Mandatory Convertible Preferred Stock",XNAS
+TELG,Leverage Shares 2X Long TEL Daily ETF,BATS
+TSEG,Leverage Shares 2X Long TSEM Daily ETF,BATS
+XSHP,Kurv SpaceX Enhanced Income ETF,BATS
+XSPC,VegaShares SpaceX & Beyond Earth ETF,XNAS
+YICCU,Yorkville International Capital Corp. Units,XNAS

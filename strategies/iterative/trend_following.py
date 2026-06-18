@@ -42,6 +42,7 @@ def ema100_trend_follower_iterative(
     pyramid_max: int = 3,
     pyramid_atr_mult: float = 0.5,
     trail_atr_mult: float = 2.0,
+    ticker_parquet_path: "Path | None" = None,
 ) -> pd.DataFrame:
     """
     Trend follower for indices / large caps with 5 rules:
@@ -68,7 +69,7 @@ def ema100_trend_follower_iterative(
     current_date_str = df["date_str"].iloc[0]
 
     # ── Load historical data and resample to daily ───────────────────────────
-    ticker_path = DATASET_ROOT / tf_str / "tickers" / f"{ticker}.parquet"
+    ticker_path = ticker_parquet_path if ticker_parquet_path is not None else DATASET_ROOT / tf_str / "tickers" / f"{ticker}.parquet"
     if not ticker_path.exists():
         return enforce_schema(pd.DataFrame())
     try:
@@ -154,7 +155,9 @@ def ema100_trend_follower_iterative(
     next_pyramid_level    = float("inf")
     trade_highs: list[float] = []
     trade_lows:  list[float] = []
-    signal_volume = signal_rvol = signal_prev_close = None
+    signal_volume = float("nan")
+    signal_rvol   = float("nan")
+    signal_prev_close = float("nan")
 
     for i in range(1, last_valid_idx + 1):
         row = df.iloc[i]
@@ -239,13 +242,13 @@ def ema100_trend_follower_iterative(
             if row["close"] > ema100 and row["high"] > high20:
                 pending_direction  = "long"
                 signal_volume      = row["volume"]
-                signal_rvol        = row.get("RVOL_daily")
-                signal_prev_close  = row.get("previous_day_close")
+                signal_rvol        = row.get("RVOL_daily", float("nan"))
+                signal_prev_close  = row.get("previous_day_close", float("nan"))
             elif row["close"] < ema100 and row["low"] < low20:
                 pending_direction  = "short"
                 signal_volume      = row["volume"]
-                signal_rvol        = row.get("RVOL_daily")
-                signal_prev_close  = row.get("previous_day_close")
+                signal_rvol        = row.get("RVOL_daily", float("nan"))
+                signal_prev_close  = row.get("previous_day_close", float("nan"))
 
     logger.debug("%-6s  %s  → %d trade(s)", ticker, current_date_str, len(trades))
     return enforce_schema(pd.DataFrame(trades))

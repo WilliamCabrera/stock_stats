@@ -793,7 +793,7 @@ if __name__ == "__main__":
     # python -m scripts.split_dataset_by_date --timeframe 5m --input-file backtest_dataset/pending_candles_5m.parquet
     _t0 = tm.time()
     run_walkforward_backtest()
-    run_up_to_date_backtest()
+    #run_up_to_date_backtest()
     print(f"run_backtest full  completado en {tm.time() - _t0:.2f}s")
     pass
 

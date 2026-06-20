@@ -65,6 +65,8 @@ One-off backfill script. Reads `backtest_dataset/STOCKS/stock_data_missing_from_
 
 **Supports resume**: tickers already written to the temp file are skipped automatically. A checkpoint is flushed to disk every 50 tickers.
 
+**Parallel fetching**: uses a `ThreadPoolExecutor` (default 8 workers) since fetching is I/O-bound. Each checkpoint log line shows elapsed time, throughput (tickers/s), and ETA. Total runtime is printed at the end.
+
 **Typical workflow:**
 ```bash
 # Step 1 — identify missing ticker-days (run once)
@@ -80,17 +82,27 @@ print(f"Missing rows: {mask.sum():,}")
 EOF
 
 # Step 2 — fetch and build (resumable)
-python -m scripts.build_missing_dataset              # 5m only (default)
+python -m scripts.build_missing_dataset              # 5m only, 8 workers
 python -m scripts.build_missing_dataset --tf 15m     # 15m only
 python -m scripts.build_missing_dataset --tf both    # 5m + 15m
+python -m scripts.build_missing_dataset --workers 16 # increase parallelism
 python -m scripts.build_missing_dataset --dry-run    # preview without fetching
 python -m scripts.build_missing_dataset --flush      # discard temp and restart from scratch
 ```
 
+CLI options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--tf` | `5m` | Timeframe: `5m`, `15m`, or `both` |
+| `--workers` | `8` | Number of parallel HTTP workers |
+| `--dry-run` | off | Print tickers that would be fetched, then exit |
+| `--flush` | off | Delete existing temp file before starting (disables resume) |
+
 Output:
 - `backtest_dataset/full/5m/full_dataset_temp.parquet`
 - `backtest_dataset/full/15m/full_dataset_temp.parquet` (if `--tf both` or `--tf 15m`)
-- `logs/build_missing_failures_5m.json` (failed tickers)
+- `logs/build_missing_failures_{tf}.json` (failed tickers, one file per timeframe)
 
 Columns are identical to `full_dataset.parquet`:
 `ticker, date, date_str, open, high, low, close, volume, atr, RVOL_daily, SMA_VOLUME_20_5m, vwap, previous_day_close, sma_9, sma_200, donchian_upper, donchian_lower, donchian_basis`

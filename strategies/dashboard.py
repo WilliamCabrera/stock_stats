@@ -739,6 +739,9 @@ if df.empty:
     st.warning("No hay trades con los filtros seleccionados.")
     st.stop()
 
+# Snapshot sin filtros avanzados — usado en tab10 para ver el universo completo
+df_full = df.copy()
+
 # ── Advanced post-filters (recompute equity after) ────────────────────────────
 if any_advanced:
     mask = pd.Series(True, index=df.index)
@@ -2185,8 +2188,9 @@ with tab9:
 
 # ── TAB 10: Market Cap & Float ────────────────────────────────────────────────
 with tab10:
-    _mkcap_avail = "market_cap" in df.columns and df["market_cap"].notna().any()
-    _float_avail = "float"      in df.columns and df["float"].notna().any()
+    # Usa df_full (sin filtros avanzados) para ver el universo completo del archivo
+    _mkcap_avail = "market_cap" in df_full.columns and df_full["market_cap"].notna().any()
+    _float_avail = "float"      in df_full.columns and df_full["float"].notna().any()
 
     if not _mkcap_avail and not _float_avail:
         st.info(
@@ -2197,17 +2201,18 @@ with tab10:
         st.stop()
 
     st.markdown("### 🏦 Análisis por Market Cap & Float")
+    st.caption(f"Universo completo: **{len(df_full):,} trades** (sin filtros avanzados aplicados)")
 
     # ── Coverage KPIs ─────────────────────────────────────────────────────────
     cov1, cov2, cov3, cov4 = st.columns(4)
     if _mkcap_avail:
-        cov1.metric("Cobertura Market Cap", f"{df['market_cap'].notna().mean()*100:.1f}%")
-        cov2.metric("Market Cap Mediana",   f"${df['market_cap'].median()/1e6:.1f}M")
+        cov1.metric("Cobertura Market Cap", f"{df_full['market_cap'].notna().mean()*100:.1f}%")
+        cov2.metric("Market Cap Mediana",   f"${df_full['market_cap'].median()/1e6:.1f}M")
     if _float_avail:
-        cov3.metric("Cobertura Float",  f"{df['float'].notna().mean()*100:.1f}%")
-        cov4.metric("Float Mediano",    f"{df['float'].median()/1e6:.2f}M shares")
+        cov3.metric("Cobertura Float",  f"{df_full['float'].notna().mean()*100:.1f}%")
+        cov4.metric("Float Mediano",    f"{df_full['float'].median()/1e6:.2f}M shares")
 
-    df_fund = df[df["market_cap"].notna() | df["float"].notna()].copy() if (_mkcap_avail or _float_avail) else df.copy()
+    df_fund = df_full[df_full["market_cap"].notna() | df_full["float"].notna()].copy() if (_mkcap_avail or _float_avail) else df_full.copy()
 
     # ── Buckets ───────────────────────────────────────────────────────────────
     if _mkcap_avail:

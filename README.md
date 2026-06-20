@@ -50,6 +50,53 @@ python -m scripts.build_full_dataset --tf 5m --from-date 2023-01-01
 
 ---
 
+### `scripts/update_full_dataset.py`
+Incremental updater for `backtest_dataset/full/{5m,15m}/full_dataset.parquet`. Queries `stock_data_filtered` via PostgREST for ticker-days newer than the latest date already stored, fetches 5m and 15m candles from Massive with a warmup lookback (15 d for 5m, 30 d for 15m), computes all indicators, and upserts the result into five destinations: `full_dataset.parquet`, per-ticker files in `tickers/`, per-date files in `dates/`, and the pending-candles queues consumed by the incremental backtest.
+
+```bash
+python -m scripts.update_full_dataset              # normal run
+python -m scripts.update_full_dataset --dry-run    # print what would be fetched
+```
+
+---
+
+### `scripts/build_missing_dataset.py`
+One-off backfill script. Reads `backtest_dataset/STOCKS/stock_data_missing_from_full.parquet` — the ticker-days present in `stock_data_filtered_from_10.parquet` but absent from `full_dataset.parquet` — fetches their 5m (or 15m) candles from Massive, computes the same indicators as `update_full_dataset.py`, and writes the result to `full_dataset_temp.parquet` without touching the existing dataset.
+
+**Supports resume**: tickers already written to the temp file are skipped automatically. A checkpoint is flushed to disk every 50 tickers.
+
+**Typical workflow:**
+```bash
+# Step 1 — identify missing ticker-days (run once)
+python - << 'EOF'
+import pandas as pd, os
+
+full = pd.read_parquet("backtest_dataset/full/5m/full_dataset.parquet", columns=["ticker","date_str"])
+pairs = set(zip(full["ticker"], full["date_str"]))
+stock = pd.read_parquet("backtest_dataset/STOCKS/stock_data_filtered_from_10.parquet")
+mask = ~pd.Series(list(zip(stock["ticker"], stock["date_str"])), index=stock.index).isin(pairs)
+stock[mask].to_parquet("backtest_dataset/STOCKS/stock_data_missing_from_full.parquet", index=False)
+print(f"Missing rows: {mask.sum():,}")
+EOF
+
+# Step 2 — fetch and build (resumable)
+python -m scripts.build_missing_dataset              # 5m only (default)
+python -m scripts.build_missing_dataset --tf 15m     # 15m only
+python -m scripts.build_missing_dataset --tf both    # 5m + 15m
+python -m scripts.build_missing_dataset --dry-run    # preview without fetching
+python -m scripts.build_missing_dataset --flush      # discard temp and restart from scratch
+```
+
+Output:
+- `backtest_dataset/full/5m/full_dataset_temp.parquet`
+- `backtest_dataset/full/15m/full_dataset_temp.parquet` (if `--tf both` or `--tf 15m`)
+- `logs/build_missing_failures_5m.json` (failed tickers)
+
+Columns are identical to `full_dataset.parquet`:
+`ticker, date, date_str, open, high, low, close, volume, atr, RVOL_daily, SMA_VOLUME_20_5m, vwap, previous_day_close, sma_9, sma_200, donchian_upper, donchian_lower, donchian_basis`
+
+---
+
 ### `scripts/split_dataset_by_ticker.py`
 Splits `full_dataset.parquet` into one `.parquet` file per ticker, preserving chronological order. Also generates a `ticker_row_counts.parquet` summary.
 
@@ -630,6 +677,7 @@ backtest_dataset/
 ├── full/                              ← small caps (5m, 15m)
 │   ├── 5m/
 │   │   ├── full_dataset.parquet       ← all tickers merged
+│   │   ├── full_dataset_temp.parquet  ← backfill output (build_missing_dataset.py)
 │   │   ├── ticker_row_counts.parquet
 │   │   ├── tickers/                   ← one file per ticker
 │   │   │   ├── AAPL.parquet

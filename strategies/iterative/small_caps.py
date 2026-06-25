@@ -778,6 +778,397 @@ def push_rejection_iterative(
     logger.debug("%-6s  %s  → %d trade(s)", ticker, df["date_str"].iloc[0], n_trades)
     return enforce_schema(pd.DataFrame(trades))
 
+def sma9_momentum_long_iterative(
+    candles: pd.DataFrame,
+    min_dist_pct: float = 0.08,
+    max_dist_pct: float = 1.0,
+    min_volume: int = 40_000,
+    target_rr: float = 10.0,
+    max_hold_hours: float = 1,
+    slippage: float = 0.001,
+    timeframe_minutes: int = 5,
+    **kwargs,  # absorbs gap_pct / stop_pct / tp_pct passed by run_backtest
+) -> pd.DataFrame:
+    """
+    Long iterativo: vela verde con SMA9 en pendiente positiva.
+
+    Condiciones de entrada (barra i):
+      1. Vela verde (close > open)
+      2. Pendiente positiva SMA9: sma_9[i] > sma_9[i-1]
+      3. volume[i] >= min_volume  (default 40 000)
+      4. (close[i] - day_low[i]) / day_low[i] entre min_dist_pct y max_dist_pct
+         donde day_low[i] = min(low[0..i]) — mínimo intradiario acumulado
+      5. No doji: cuerpo / rango total >= 10%
+      6. bar[i-1] es el verdadero anterior (sin huecos de tiempo)
+
+    Entrada:  open de la vela siguiente (long: compra)
+    SL:       day_low en la barra de señal
+    TP:       entry + target_rr × (entry − SL)
+    Tiempo:   si a las max_hold_hours desde la entrada no se alcanzó TP/SL,
+              cierra al open de la siguiente vela
+    Cierre forzado en la última vela antes de las 16:00.
+    """
+    STRATEGY = f"sma9_momentum_long_iterative_{min_dist_pct}_{max_dist_pct}_{target_rr}"
+    CLOSE_HOUR = 16
+    expected_delta = pd.Timedelta(minutes=timeframe_minutes)
+    MIN_BODY_RATIO = 0.10
+
+    df = candles.reset_index(drop=True)
+    if len(df) < 3:
+        logger.debug("%-6s  skipped — less than 3 candles", candles["ticker"].iloc[0] if len(candles) else "?")
+        return pd.DataFrame()
+
+    ticker = df["ticker"].iloc[0]
+
+    before_close = df["date"].dt.hour < CLOSE_HOUR
+    if not before_close.any():
+        return pd.DataFrame()
+    last_valid_idx = before_close[before_close].index[-1]
+
+    no_gap    = df["date"].diff() == expected_delta
+    day_low   = df["low"].cummin()
+    prev_sma9 = df["sma_9"].shift(1)
+
+    green      = df["close"] > df["open"]
+    sma9_up    = df["sma_9"] > prev_sma9
+    vol_cond   = df["volume"] >= min_volume
+    dist_pct   = (df["close"] - day_low) / day_low.clip(lower=1e-8)
+    dist_cond  = (dist_pct > min_dist_pct) & (dist_pct < max_dist_pct)
+    body_ratio = (df["close"] - df["open"]) / (df["high"] - df["low"]).clip(lower=1e-8)
+    no_doji    = body_ratio >= MIN_BODY_RATIO
+
+    signal = green & sma9_up & vol_cond & dist_cond & no_doji & no_gap
+
+    hold_delta = pd.Timedelta(hours=max_hold_hours)
+
+    trades: list[dict] = []
+    position           = None
+    pending_entry      = False
+    pending_exit       = False
+    entry_price        = sl_price = tp_price = 0.0
+    entry_time         = entry_volume = entry_date_str = None
+    signal_volume      = signal_rvol = signal_prev_close = None
+    signal_day_low     = None
+    time_exit_deadline = None
+    trade_highs: list[float] = []
+    trade_lows:  list[float] = []
+
+    for i in range(1, last_valid_idx + 1):
+        row = df.iloc[i]
+
+        # ── Cerrar posición al open de esta vela ─────────────────────────
+        if pending_exit:
+            exit_price = row["open"] * (1 - slippage)
+            pnl        = exit_price - entry_price
+            rr_actual  = (tp_price - entry_price) / (entry_price - sl_price) if (entry_price - sl_price) > 1e-8 else 0
+            mae        = entry_price - min(trade_lows)
+            mfe        = max(trade_highs) - entry_price
+            trades.append({
+                "ticker":             ticker,
+                "date_str":           entry_date_str,
+                "type":               "long",
+                "entry_price":        entry_price,
+                "exit_price":         exit_price,
+                "stop_loss_price":    round(sl_price, 4),
+                "take_profit_price":  round(tp_price, 4),
+                "risk_reward_ratio":  round(rr_actual, 4),
+                "pnl":                round(pnl, 4),
+                "Return":             round(pnl / entry_price, 4),
+                "MAE":                round(mae, 4),
+                "mae_pct":            round(mae / entry_price * 100, 4),
+                "MFE":                round(mfe, 4),
+                "mfe_pct":            round(mfe / entry_price * 100, 4),
+                "rvol_daily":         signal_rvol,
+                "previous_day_close": signal_prev_close,
+                "volume":             signal_volume,
+                "entry_volume":       entry_volume,
+                "entry_time":         entry_time,
+                "exit_time":          row["date"],
+                "strategy":           STRATEGY,
+            })
+            position           = None
+            pending_exit       = False
+            time_exit_deadline = None
+            trade_highs        = []
+            trade_lows         = []
+            continue
+
+        # ── Abrir posición al open de esta vela ──────────────────────────
+        if pending_entry:
+            entry_price = row["open"] * (1 + slippage)
+            sl_price    = signal_day_low
+            risk        = entry_price - sl_price
+            if risk <= 1e-8:
+                # next bar opened below day low — skip trade
+                pending_entry = False
+            else:
+                tp_price           = entry_price + target_rr * risk
+                entry_time         = row["date"]
+                entry_volume       = row["volume"]
+                entry_date_str     = row["date_str"]
+                time_exit_deadline = entry_time + hold_delta
+                position           = "long"
+                pending_entry      = False
+                trade_highs        = [row["high"]]
+                trade_lows         = [row["low"]]
+
+        elif position == "long":
+            trade_highs.append(row["high"])
+            trade_lows.append(row["low"])
+
+        # ── Detectar SL/TP/tiempo o cierre forzado EOD ───────────────────
+        if position == "long":
+            hit_tp   = row["high"] >= tp_price
+            hit_sl   = row["low"]  <= sl_price
+            hit_time = row["date"] >= time_exit_deadline
+            is_last  = i == last_valid_idx
+
+            if (hit_tp or hit_sl or hit_time) and not is_last:
+                pending_exit = True
+
+            elif is_last:
+                exit_price = row["close"] * (1 - slippage)
+                pnl        = exit_price - entry_price
+                rr_actual  = (tp_price - entry_price) / (entry_price - sl_price) if (entry_price - sl_price) > 1e-8 else 0
+                mae        = entry_price - min(trade_lows)
+                mfe        = max(trade_highs) - entry_price
+                trades.append({
+                    "ticker":             ticker,
+                    "date_str":           entry_date_str,
+                    "type":               "long",
+                    "entry_price":        entry_price,
+                    "exit_price":         exit_price,
+                    "stop_loss_price":    round(sl_price, 4),
+                    "take_profit_price":  round(tp_price, 4),
+                    "risk_reward_ratio":  round(rr_actual, 4),
+                    "pnl":                round(pnl, 4),
+                    "Return":             round(pnl / entry_price, 4),
+                    "MAE":                round(mae, 4),
+                    "mae_pct":            round(mae / entry_price * 100, 4),
+                    "MFE":                round(mfe, 4),
+                    "mfe_pct":            round(mfe / entry_price * 100, 4),
+                    "rvol_daily":         signal_rvol,
+                    "previous_day_close": signal_prev_close,
+                    "volume":             signal_volume,
+                    "entry_volume":       entry_volume,
+                    "entry_time":         entry_time,
+                    "exit_time":          row["date"],
+                    "strategy":           STRATEGY,
+                })
+                position           = None
+                time_exit_deadline = None
+                trade_highs        = []
+                trade_lows         = []
+
+        # ── Detectar señal — entrada en la próxima barra ─────────────────
+        next_i = i + 1
+        if (
+            position is None
+            and signal.iloc[i]
+            and next_i <= last_valid_idx
+            and no_gap.iloc[next_i]
+        ):
+            pending_entry     = True
+            signal_volume     = row["volume"]
+            signal_rvol       = row["RVOL_daily"]
+            signal_prev_close = row["previous_day_close"]
+            signal_day_low    = day_low.iloc[i]
+            logger.debug("SIGNAL  %-6s  %s  bar=%s  close=%.4f", ticker, row["date_str"], row["date"], row["close"])
+
+    n_trades = len(trades)
+    logger.debug("%-6s  %s  → %d trade(s)", ticker, df["date_str"].iloc[0], n_trades)
+    return enforce_schema(pd.DataFrame(trades))
+
+
+def _dynamic_target_rr(dist_pct: float) -> float:
+    """
+    Target R:R tiered by how far the entry close is from the intraday low.
+
+    dist_pct = (close − day_low) / day_low
+
+      0 – 10 %  →  10
+     10 – 20 %  →   8
+     20 – 30 %  →   7
+     30 – 40 %  →   6
+     40 – 50 %  →   5
+     50 – 60 %  →   4
+     60 – 70 %  →   3
+     70 %+      →   2
+    """
+    if dist_pct < 0.10: return 10.0
+    if dist_pct < 0.20: return  4.0
+    if dist_pct < 0.30: return  4.0
+    if dist_pct < 0.40: return  3.0
+    if dist_pct < 0.50: return  2.0
+    if dist_pct < 0.60: return  2.0
+    if dist_pct < 0.70: return  1.0
+    return 1.0
+
+
+def sma9_momentum_long_dynrr_iterative(
+    candles: pd.DataFrame,
+    min_dist_pct: float = 0.08,
+    max_dist_pct: float = 0.80,
+    min_volume: int = 40_000,
+    max_hold_hours: float = 1.0,
+    slippage: float = 0.001,
+    timeframe_minutes: int = 5,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    Igual que sma9_momentum_long_iterative pero con target_rr dinámico:
+    cuanto más lejos está el cierre del mínimo intradiario, menor el objetivo.
+
+      dist  0–10 %  → rr 10
+      dist 10–20 %  → rr  8
+      dist 20–30 %  → rr  7
+      … (ver _dynamic_target_rr)
+
+    El rr se fija en la barra de señal y no cambia durante el trade.
+    """
+    STRATEGY = "sma9_momentum_long_dynrr_iterative"
+    CLOSE_HOUR = 16
+    expected_delta = pd.Timedelta(minutes=timeframe_minutes)
+    MIN_BODY_RATIO = 0.10
+
+    df = candles.reset_index(drop=True)
+    if len(df) < 3:
+        return pd.DataFrame()
+
+    ticker = df["ticker"].iloc[0]
+
+    before_close = df["date"].dt.hour < CLOSE_HOUR
+    if not before_close.any():
+        return pd.DataFrame()
+    last_valid_idx = before_close[before_close].index[-1]
+
+    no_gap    = df["date"].diff() == expected_delta
+    day_low   = df["low"].cummin()
+    prev_sma9 = df["sma_9"].shift(1)
+
+    green      = df["close"] > df["open"]
+    sma9_up    = df["sma_9"] > prev_sma9
+    vol_cond   = df["volume"] >= min_volume
+    dist_pct   = (df["close"] - day_low) / day_low.clip(lower=1e-8)
+    dist_cond  = (dist_pct > min_dist_pct) & (dist_pct < max_dist_pct)
+    body_ratio = (df["close"] - df["open"]) / (df["high"] - df["low"]).clip(lower=1e-8)
+    no_doji    = body_ratio >= MIN_BODY_RATIO
+
+    signal = green & sma9_up & vol_cond & dist_cond & no_doji & no_gap
+
+    hold_delta = pd.Timedelta(hours=max_hold_hours)
+
+    trades: list[dict] = []
+    position           = None
+    pending_entry      = False
+    pending_exit       = False
+    entry_price        = sl_price = tp_price = 0.0
+    entry_time         = entry_volume = entry_date_str = None
+    signal_volume      = signal_rvol = signal_prev_close = None
+    signal_day_low     = None
+    signal_target_rr   = None
+    time_exit_deadline = None
+    trade_highs: list[float] = []
+    trade_lows:  list[float] = []
+
+    def _record(exit_price, exit_time):
+        pnl       = exit_price - entry_price
+        rr_actual = (tp_price - entry_price) / (entry_price - sl_price) if (entry_price - sl_price) > 1e-8 else 0
+        mae       = entry_price - min(trade_lows)
+        mfe       = max(trade_highs) - entry_price
+        return {
+            "ticker":             ticker,
+            "date_str":           entry_date_str,
+            "type":               "long",
+            "entry_price":        entry_price,
+            "exit_price":         exit_price,
+            "stop_loss_price":    round(sl_price, 4),
+            "take_profit_price":  round(tp_price, 4),
+            "risk_reward_ratio":  round(rr_actual, 4),
+            "pnl":                round(pnl, 4),
+            "Return":             round(pnl / entry_price, 4),
+            "MAE":                round(mae, 4),
+            "mae_pct":            round(mae / entry_price * 100, 4),
+            "MFE":                round(mfe, 4),
+            "mfe_pct":            round(mfe / entry_price * 100, 4),
+            "rvol_daily":         signal_rvol,
+            "previous_day_close": signal_prev_close,
+            "volume":             signal_volume,
+            "entry_volume":       entry_volume,
+            "entry_time":         entry_time,
+            "exit_time":          exit_time,
+            "strategy":           STRATEGY,
+        }
+
+    for i in range(1, last_valid_idx + 1):
+        row = df.iloc[i]
+
+        # ── Cerrar posición al open de esta vela ─────────────────────────
+        if pending_exit:
+            trades.append(_record(row["open"] * (1 - slippage), row["date"]))
+            position           = None
+            pending_exit       = False
+            time_exit_deadline = None
+            trade_highs        = []
+            trade_lows         = []
+            continue
+
+        # ── Abrir posición al open de esta vela ──────────────────────────
+        if pending_entry:
+            entry_price = row["open"] * (1 + slippage)
+            sl_price    = signal_day_low
+            risk        = entry_price - sl_price
+            if risk <= 1e-8:
+                pending_entry = False
+            else:
+                tp_price           = entry_price + signal_target_rr * risk
+                entry_time         = row["date"]
+                entry_volume       = row["volume"]
+                entry_date_str     = row["date_str"]
+                time_exit_deadline = entry_time + hold_delta
+                position           = "long"
+                pending_entry      = False
+                trade_highs        = [row["high"]]
+                trade_lows         = [row["low"]]
+
+        elif position == "long":
+            trade_highs.append(row["high"])
+            trade_lows.append(row["low"])
+
+        # ── Detectar SL / TP / tiempo / EOD ─────────────────────────────
+        if position == "long":
+            hit_tp   = row["high"] >= tp_price
+            hit_sl   = row["low"]  <= sl_price
+            hit_time = row["date"] >= time_exit_deadline
+            is_last  = i == last_valid_idx
+
+            if (hit_tp or hit_sl or hit_time) and not is_last:
+                pending_exit = True
+            elif is_last:
+                trades.append(_record(row["close"] * (1 - slippage), row["date"]))
+                position           = None
+                time_exit_deadline = None
+                trade_highs        = []
+                trade_lows         = []
+
+        # ── Detectar señal ───────────────────────────────────────────────
+        next_i = i + 1
+        if (
+            position is None
+            and signal.iloc[i]
+            and next_i <= last_valid_idx
+            and no_gap.iloc[next_i]
+        ):
+            pending_entry     = True
+            signal_volume     = row["volume"]
+            signal_rvol       = row["RVOL_daily"]
+            signal_prev_close = row["previous_day_close"]
+            signal_day_low    = day_low.iloc[i]
+            signal_target_rr  = _dynamic_target_rr(float(dist_pct.iloc[i]))
+
+    return enforce_schema(pd.DataFrame(trades))
+
+
 # ======== small caps backtesting helpers ========
 # Moved to strategies/iterative/backtest_helpers.py
 from strategies.iterative.backtest_helpers import (
@@ -792,8 +1183,8 @@ from strategies.iterative.backtest_helpers import (
 if __name__ == "__main__":
     # python -m scripts.split_dataset_by_date --timeframe 5m --input-file backtest_dataset/pending_candles_5m.parquet
     _t0 = tm.time()
-    #run_walkforward_backtest()
-    #run_up_to_date_backtest()
+    run_walkforward_backtest()
+    run_up_to_date_backtest()
     print(f"run_backtest full  completado en {tm.time() - _t0:.2f}s")
     pass
 

@@ -277,12 +277,25 @@ def build_trade_chart(candles: pd.DataFrame, trade: pd.Series,
     # ── Markers ───────────────────────────────────────────────────────────────
     entry_ts = ts(entry_dt)
     exit_ts  = ts(exit_dt)
+    _trade_type = str(trade.get("Type", trade.get("type", "short"))).lower()
+    is_short    = _trade_type == "short"
     markers  = [
-        {"time": entry_ts, "position": "aboveBar", "color": "#ef5350",
-         "shape": "arrowDown", "text": f"SHORT ${entry_p:.2f}", "size": 2},
-        {"time": exit_ts,  "position": "belowBar",
-         "color": "#26a69a" if is_winner else "#ef5350",
-         "shape": "arrowUp", "text": f"EXIT ${exit_p:.2f}", "size": 2},
+        {
+            "time":     entry_ts,
+            "position": "aboveBar" if is_short else "belowBar",
+            "color":    "#ef5350"  if is_short else "#26a69a",
+            "shape":    "arrowDown" if is_short else "arrowUp",
+            "text":     f"{'SHORT' if is_short else 'LONG'} ${entry_p:.2f}",
+            "size":     2,
+        },
+        {
+            "time":     exit_ts,
+            "position": "belowBar" if is_short else "aboveBar",
+            "color":    "#26a69a" if is_winner else "#ef5350",
+            "shape":    "arrowUp" if is_short else "arrowDown",
+            "text":     f"EXIT ${exit_p:.2f}",
+            "size":     2,
+        },
     ]
 
     # ── Flat level helper ─────────────────────────────────────────────────────

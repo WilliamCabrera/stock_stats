@@ -412,17 +412,21 @@ def trades_to_markers(
 
     for _, row in df.iterrows():
         # Strip timezone so _to_dt localizes as ET without conversion
-        entry_ts = row["entry_time"].strftime("%Y-%m-%d %H:%M:%S")
-        exit_ts  = row["exit_time"].strftime("%Y-%m-%d %H:%M:%S")
-
-        pnl_sign = "+" if row["pnl"] >= 0 else ""
+        entry_ts    = row["entry_time"].strftime("%Y-%m-%d %H:%M:%S")
         entry_label = f"entry @ {row['entry_price']:.2f}  {row['entry_time'].strftime('%H:%M')}"
-        exit_label  = f"exit @ {row['exit_price']:.2f}  {row['exit_time'].strftime('%H:%M')}  ({pnl_sign}{row['pnl']:.2f})"
+        is_open     = bool(row.get("is_open", False))
+
+        if not is_open:
+            pnl_sign   = "+" if row["pnl"] >= 0 else ""
+            exit_ts    = row["exit_time"].strftime("%Y-%m-%d %H:%M:%S")
+            exit_label = f"exit @ {row['exit_price']:.2f}  {row['exit_time'].strftime('%H:%M')}  ({pnl_sign}{row['pnl']:.2f})"
 
         if str(row.get("type", "")).lower() == "short":
             short_entries.append({"time": entry_ts, "price": row["entry_price"], "label": entry_label})
-            short_exits.append(  {"time": exit_ts,  "price": row["exit_price"],  "label": exit_label})
+            if not is_open:
+                short_exits.append({"time": exit_ts, "price": row["exit_price"], "label": exit_label})
         else:
             entries.append({"time": entry_ts, "price": row["entry_price"], "label": entry_label})
-            exits.append(  {"time": exit_ts,  "price": row["exit_price"],  "label": exit_label})
+            if not is_open:
+                exits.append({"time": exit_ts, "price": row["exit_price"], "label": exit_label})
     return entries, exits, short_entries, short_exits

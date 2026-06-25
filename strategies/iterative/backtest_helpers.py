@@ -18,7 +18,31 @@ from app.config import get_settings
 from app.utils.charts import CHARTS_DIR, _write_fullscreen_html
 
 DATASET_ROOT   = Path(os.path.abspath(".")) / "backtest_dataset" / "full"
+DATASET_ROOT_WF = Path(os.path.abspath(".")) / "backtest_dataset" / "walkforward"
 DATASET_ROOT_1 = Path(__file__).resolve().parent
+
+
+def _wf_cutoff_date(timeframe: str) -> str | None:
+    """
+    Returns the last OOS date across all walkforward folds for a given timeframe,
+    as "YYYY-MM-DD". Returns None if no walkforward data exists.
+
+    Used by run_up_to_date_backtest to avoid re-running dates already covered by
+    the walkforward validation period.
+    """
+    wf_root = DATASET_ROOT_WF / timeframe
+    if not wf_root.exists():
+        return None
+    last_date = None
+    for fold_dir in wf_root.iterdir():
+        oos_dir = fold_dir / "dates_OOS"
+        if not oos_dir.exists():
+            continue
+        for f in oos_dir.glob("*.parquet"):
+            d = f.stem.replace("_", "-")
+            if last_date is None or d > last_date:
+                last_date = d
+    return last_date
 
 _LOG_DIR = Path(os.path.abspath(".")) / "logs" / "iterative"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -327,7 +351,8 @@ def run_backtest(
     tp_pct: float = 0.20,
     dates_dir: str | Path | None = None,
     out_dir: str | Path | None = None,
-    out_put_name=None
+    out_put_name=None,
+    **extra_kwargs,
 ) -> pd.DataFrame:
     """
     Corre un backtest iterativo leyendo cada archivo de fechas en dates_dir.
@@ -447,6 +472,7 @@ def run_backtest(
                     tp_pct=tp_pct,
                     slippage=slippage,
                     timeframe_minutes=tf_minutes,
+                    **extra_kwargs,
                 )
             except Exception as e:
                 logger.warning("%-6s  %s — strategy error: %s", ticker, day_str, e)
@@ -457,7 +483,7 @@ def run_backtest(
 
         if day_trades:
             day_result = pd.concat(day_trades, ignore_index=True)
-            day_result = _enrich_trades_with_fundamentals(day_result)
+            #day_result = _enrich_trades_with_fundamentals(day_result)
             _append_trades(day_result)
             total_trades_session += len(day_result)
             logger.info("[%d/%d] %s  tickers=%d  trades=%d", idx, total_dates, day_str, n_tickers, len(day_result))
@@ -525,6 +551,8 @@ def run_walkforward_backtest(from_date: str | None = None, to_date: str | None =
             stop_pct     = p["stop_pct"]
             tp_pct       = p["tp_pct"]
             out_put_name = p["out_put_name"]
+            extra_params = {k: v for k, v in p.items()
+                            if k not in ("slippage", "gap_pct", "stop_pct", "tp_pct", "out_put_name")}
 
             logger.info("WF  strategy=%s  params=%s", strategy_name, out_put_name)
 
@@ -543,17 +571,34 @@ def run_walkforward_backtest(from_date: str | None = None, to_date: str | None =
                     dates_dir=dates_dir,
                     out_dir=out_dir,
                     out_put_name=out_put_name,
+                    **extra_params,
                 )
 
     logger.info("run_walkforward_backtest completado en %.2fs", tm.time() - _t0)
 
 
-def run_up_to_date_backtest(from_date: str | None = None, to_date: str | None = None, strategies: list | None = None):
+def run_up_to_date_backtest(
+    from_date: str | None = None,
+    to_date: str | None = None,
+    strategies: list | None = None,
+    skip_walkforward_dates: bool = True,
+):
     """
     Up-to-date backtest driven by STRATEGIES registry.
 
     For every entry in STRATEGIES, and for every params set in entry["params"],
     runs run_backtest on the full dataset for both 5m and 15m timeframes.
+
+    Args:
+        from_date:              Start date "YYYY-MM-DD". If None and
+                                skip_walkforward_dates=True, auto-detected as the
+                                day after the last OOS date in the walkforward folds.
+        to_date:                End date "YYYY-MM-DD". None = up to latest available.
+        strategies:             Override the registry. None = use STRATEGIES.
+        skip_walkforward_dates: If True (default), small_caps strategies will only
+                                run on dates after the walkforward OOS period ends,
+                                avoiding double-counting with run_walkforward_backtest.
+                                Pass False to run on the full historical range.
     """
     _t0 = tm.time()
     _strategies = strategies if strategies is not None else _default_strategies()
@@ -571,10 +616,26 @@ def run_up_to_date_backtest(from_date: str | None = None, to_date: str | None = 
             else:
                 strategy_func = entry["strategy_func"]
                 for tf in ["5m", "15m"]:
+                    # Auto-detect WF cutoff so UP-TO-DATE never overlaps with WF folds
+                    effective_from = from_date
+                    if effective_from is None and skip_walkforward_dates:
+                        cutoff = _wf_cutoff_date(tf)
+                        if cutoff is not None:
+                            # cutoff is the last OOS date; start the day after
+                            from datetime import date, timedelta
+                            next_day = (date.fromisoformat(cutoff) + timedelta(days=1)).isoformat()
+                            effective_from = next_day
+                            logger.info(
+                                "UP-TO-DATE  tf=%s  WF cutoff=%s → from_date=%s",
+                                tf, cutoff, effective_from,
+                            )
+
+                    _extra = {k: v for k, v in p.items()
+                              if k not in ("slippage", "gap_pct", "stop_pct", "tp_pct", "out_put_name")}
                     run_backtest(
                         timeframe=tf,
                         strategy_func=strategy_func,
-                        from_date=from_date,
+                        from_date=effective_from,
                         to_date=to_date,
                         slippage=p["slippage"],
                         gap_pct=p["gap_pct"],
@@ -583,6 +644,7 @@ def run_up_to_date_backtest(from_date: str | None = None, to_date: str | None = 
                         dates_dir=f"backtest_dataset/full/{tf}/dates",
                         out_dir=f"strategies/iterative/UP-TO-DATE/{tf}/{out_put_name}",
                         out_put_name=out_put_name,
+                        **_extra,
                     )
 
     logger.info("run_up_to_date_backtest completado en %.2fs", tm.time() - _t0)
@@ -657,6 +719,8 @@ def run_iterative_incremental_backtest(strategies: list | None = None):
                 max_date = pending_dates[-1]
                 logger.info("[%s] Pending dates: %s → %s (%d date(s))", timeframe, min_date, max_date, len(pending_dates))
 
+                _extra = {k: v for k, v in p.items()
+                          if k not in ("slippage", "gap_pct", "stop_pct", "tp_pct", "out_put_name")}
                 run_backtest(
                     timeframe=timeframe,
                     strategy_func=strategy_func,
@@ -669,6 +733,7 @@ def run_iterative_incremental_backtest(strategies: list | None = None):
                     dates_dir=f"backtest_dataset/full/{timeframe}/dates",
                     out_dir=f"strategies/iterative/UP-TO-DATE/{timeframe}/{out_put_name}",
                     out_put_name=out_put_name,
+                    **_extra,
                 )
 
     # Clear pending candles that were just processed
@@ -760,58 +825,112 @@ def _run_indices_walkforward(
                     logger.warning("[INDICES WF] %s fold_%d/%s — columna date_str no encontrada.", ticker, fold_n, file_stem)
                     continue
 
-                if from_date:
-                    fold_df = fold_df[fold_df["date_str"] >= from_date]
-                if to_date:
-                    fold_df = fold_df[fold_df["date_str"] <= to_date]
+                if entry.get("multi_day"):
+                    # Multi-day: precompute on full history for correct SMA/ATR lookback,
+                    # then slice to this fold's date range and run at once.
+                    # Trades reaching the fold boundary without SL hit → is_open=True.
+                    if full_parquet.exists():
+                        full_df = pd.read_parquet(full_parquet).sort_values("date").reset_index(drop=True)
+                        precompute_fn = entry.get("precompute_fn")
+                        if precompute_fn is not None:
+                            full_df = precompute_fn(full_df, **{k: v for k, v in p.items() if k != "out_put_name"})
+                        fold_min = fold_df["date_str"].min()
+                        fold_max = fold_df["date_str"].max()
+                        if from_date:
+                            fold_min = max(fold_min, from_date)
+                        if to_date:
+                            fold_max = min(fold_max, to_date)
+                        run_df = full_df[(full_df["date_str"] >= fold_min) & (full_df["date_str"] <= fold_max)]
+                    else:
+                        run_df = fold_df
 
-                dates = sorted(fold_df["date_str"].unique())
-                if not dates:
-                    continue
-
-                logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  %d fechas",
-                            strategy_name, fold_n, split, tf, ticker, len(dates))
-
-                day_trades: list[pd.DataFrame] = []
-                expected_delta = pd.Timedelta(minutes=tf_minutes)
-                for day_str in dates:
-                    candles = fold_df[fold_df["date_str"] == day_str].copy().reset_index(drop=True)
-                    if len(candles) < 2:
+                    if run_df.empty:
                         continue
-                    rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
-                    if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
-                        logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
-                        continue
+
+                    extra_params = {k: v for k, v in p.items()
+                                    if k not in ("out_put_name", "slippage", "gap_pct", "stop_pct", "tp_pct")}
+                    logger.info("[INDICES WF][MULTI_DAY] %s  fold_%d/%s  %s  %s  %d barras",
+                                strategy_name, fold_n, split, tf, ticker, len(run_df))
                     try:
                         trades = strategy_func(
-                            candles,
+                            run_df,
                             gap_pct=p["gap_pct"],
                             stop_pct=p["stop_pct"],
                             tp_pct=p["tp_pct"],
                             slippage=p["slippage"],
                             timeframe_minutes=tf_minutes,
-                            ticker_parquet_path=ticker_parquet_path,
+                            **extra_params,
                         )
                     except Exception as e:
-                        logger.warning("[INDICES WF] %-6s  %s — strategy error: %s", ticker, day_str, e)
+                        logger.warning("[INDICES WF][MULTI_DAY] %-6s  fold_%d/%s — error: %s", ticker, fold_n, split, e)
                         continue
+
                     if trades is not None and not trades.empty:
                         trades["timeframe"] = tf
-                        day_trades.append(trades)
+                        if out_path.exists():
+                            existing = pd.read_parquet(out_path)
+                            existing = existing[existing["ticker"] != ticker]
+                            combined = pd.concat([existing, trades], ignore_index=True)
+                        else:
+                            combined = trades
+                        combined.to_parquet(out_path, index=False)
+                        open_n = int(trades["is_open"].sum()) if "is_open" in trades.columns else 0
+                        logger.info("[INDICES WF][MULTI_DAY] %s  fold_%d/%s  %s  %s  → %d trades (%d open)",
+                                    strategy_name, fold_n, split, tf, ticker, len(trades), open_n)
 
-                if day_trades:
-                    new_df = pd.concat(day_trades, ignore_index=True)
-                    if out_path.exists():
-                        existing = pd.read_parquet(out_path)
-                        combined = pd.concat([existing, new_df], ignore_index=True)
-                        combined = combined.drop_duplicates(
-                            subset=["ticker", "date_str", "entry_time"], keep="last"
-                        )
-                    else:
-                        combined = new_df
-                    combined.to_parquet(out_path, index=False)
-                    logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  → %d trades escritos",
-                                strategy_name, fold_n, split, tf, ticker, len(new_df))
+                else:
+                    if from_date:
+                        fold_df = fold_df[fold_df["date_str"] >= from_date]
+                    if to_date:
+                        fold_df = fold_df[fold_df["date_str"] <= to_date]
+
+                    dates = sorted(fold_df["date_str"].unique())
+                    if not dates:
+                        continue
+
+                    logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  %d fechas",
+                                strategy_name, fold_n, split, tf, ticker, len(dates))
+
+                    day_trades: list[pd.DataFrame] = []
+                    expected_delta = pd.Timedelta(minutes=tf_minutes)
+                    for day_str in dates:
+                        candles = fold_df[fold_df["date_str"] == day_str].copy().reset_index(drop=True)
+                        if len(candles) < 2:
+                            continue
+                        rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
+                        if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
+                            logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
+                            continue
+                        try:
+                            trades = strategy_func(
+                                candles,
+                                gap_pct=p["gap_pct"],
+                                stop_pct=p["stop_pct"],
+                                tp_pct=p["tp_pct"],
+                                slippage=p["slippage"],
+                                timeframe_minutes=tf_minutes,
+                                ticker_parquet_path=ticker_parquet_path,
+                            )
+                        except Exception as e:
+                            logger.warning("[INDICES WF] %-6s  %s — strategy error: %s", ticker, day_str, e)
+                            continue
+                        if trades is not None and not trades.empty:
+                            trades["timeframe"] = tf
+                            day_trades.append(trades)
+
+                    if day_trades:
+                        new_df = pd.concat(day_trades, ignore_index=True)
+                        if out_path.exists():
+                            existing = pd.read_parquet(out_path)
+                            combined = pd.concat([existing, new_df], ignore_index=True)
+                            combined = combined.drop_duplicates(
+                                subset=["ticker", "date_str", "entry_time"], keep="last"
+                            )
+                        else:
+                            combined = new_df
+                        combined.to_parquet(out_path, index=False)
+                        logger.info("[INDICES WF] %s  fold_%d/%s  %s  %s  → %d trades escritos",
+                                    strategy_name, fold_n, split, tf, ticker, len(new_df))
 
 
 def _run_indices_incremental(entry: dict, p: dict) -> None:
@@ -924,61 +1043,108 @@ def _run_indices_uptodate(
                 logger.warning("[INDICES] %s %s %s — columna date_str no encontrada.", strategy_name, tf, ticker)
                 continue
 
-            if from_date:
-                full_df = full_df[full_df["date_str"] >= from_date]
-            if to_date:
-                full_df = full_df[full_df["date_str"] <= to_date]
-            if resume_from:
-                full_df = full_df[full_df["date_str"] > resume_from]
+            precompute_fn = entry.get("precompute_fn")
+            if precompute_fn is not None:
+                full_df = precompute_fn(full_df, **{k: v for k, v in p.items() if k != "out_put_name"})
 
-            dates = sorted(full_df["date_str"].unique())
-            if not dates:
-                continue
-
-            logger.info("[INDICES] %s  %s  %s  %d fechas", strategy_name, tf, ticker, len(dates))
             total_session = 0
 
-            expected_delta = pd.Timedelta(minutes=tf_minutes)
-            for day_str in dates:
-                candles = full_df[full_df["date_str"] == day_str].copy().reset_index(drop=True)
-                if len(candles) < 2:
-                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+            if entry.get("multi_day"):
+                # Multi-day strategy: NEVER filter by from_date or resume_from.
+                # Cutting history would orphan any trade that entered before the cutoff,
+                # making it impossible to detect its open/close status.
+                # Only to_date is respected (useful for bounded testing).
+                # The output parquet is fully overwritten each run so there are no
+                # stale "open" records from previous executions.
+                run_df = full_df[full_df["date_str"] <= to_date] if to_date else full_df
+                if run_df.empty:
                     continue
-                rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
-                if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
-                    logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
-                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
-                    continue
+                extra_params = {k: v for k, v in p.items()
+                                if k not in ("out_put_name", "slippage", "gap_pct", "stop_pct", "tp_pct")}
+                logger.info("[INDICES][MULTI_DAY] %s  %s  %s  %d barras", strategy_name, tf, ticker, len(run_df))
                 try:
                     trades = strategy_func(
-                        candles,
+                        run_df,
                         gap_pct=gap_pct,
                         stop_pct=stop_pct,
                         tp_pct=tp_pct,
                         slippage=slippage,
                         timeframe_minutes=tf_minutes,
-                        # Resolved from registry: runner constructs path, strategy receives it
-                        ticker_parquet_path=parquet_path,
+                        **extra_params,
                     )
                 except Exception as e:
-                    logger.warning("[INDICES] %-6s  %s — strategy error: %s", ticker, day_str, e)
-                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                    logger.warning("[INDICES][MULTI_DAY] %-6s — strategy error: %s", ticker, e)
                     continue
 
                 if trades is not None and not trades.empty:
                     trades["timeframe"] = tf
+                    # Replace only this ticker's rows — preserve other tickers already saved
                     if out_path.exists():
                         existing = pd.read_parquet(out_path)
+                        existing = existing[existing["ticker"] != ticker]
                         combined = pd.concat([existing, trades], ignore_index=True)
-                        combined = combined.drop_duplicates(
-                            subset=["ticker", "date_str", "entry_time"], keep="last"
-                        )
                     else:
                         combined = trades
                     combined.to_parquet(out_path, index=False)
                     total_session += len(trades)
+                    open_n = int(trades["is_open"].sum()) if "is_open" in trades.columns else 0
+                    logger.info("[INDICES][MULTI_DAY] %s  %s  %s  %d trades (%d open)",
+                                strategy_name, tf, ticker, len(trades), open_n)
 
-                checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+            else:
+                # Day-by-day strategy: apply all date filters and iterate per date
+                if from_date:
+                    full_df = full_df[full_df["date_str"] >= from_date]
+                if to_date:
+                    full_df = full_df[full_df["date_str"] <= to_date]
+                if resume_from:
+                    full_df = full_df[full_df["date_str"] > resume_from]
+
+                dates = sorted(full_df["date_str"].unique())
+                if not dates:
+                    continue
+
+                logger.info("[INDICES] %s  %s  %s  %d fechas", strategy_name, tf, ticker, len(dates))
+                expected_delta = pd.Timedelta(minutes=tf_minutes)
+                for day_str in dates:
+                    candles = full_df[full_df["date_str"] == day_str].copy().reset_index(drop=True)
+                    if len(candles) < 2:
+                        checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                        continue
+                    rth = candles[(candles["date"].dt.hour >= 9) & (candles["date"].dt.hour < 16)]
+                    if len(rth) > 1 and (rth["date"].diff().iloc[1:] != expected_delta).any():
+                        logger.debug("%-6s  %s — gaps in RTH candles, skip", ticker, day_str)
+                        checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                        continue
+                    try:
+                        trades = strategy_func(
+                            candles,
+                            gap_pct=gap_pct,
+                            stop_pct=stop_pct,
+                            tp_pct=tp_pct,
+                            slippage=slippage,
+                            timeframe_minutes=tf_minutes,
+                            ticker_parquet_path=parquet_path,
+                        )
+                    except Exception as e:
+                        logger.warning("[INDICES] %-6s  %s — strategy error: %s", ticker, day_str, e)
+                        checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
+                        continue
+
+                    if trades is not None and not trades.empty:
+                        trades["timeframe"] = tf
+                        if out_path.exists():
+                            existing = pd.read_parquet(out_path)
+                            combined = pd.concat([existing, trades], ignore_index=True)
+                            combined = combined.drop_duplicates(
+                                subset=["ticker", "date_str", "entry_time"], keep="last"
+                            )
+                        else:
+                            combined = trades
+                        combined.to_parquet(out_path, index=False)
+                        total_session += len(trades)
+
+                    checkpoint_path.write_text(json.dumps({"last_completed_date": day_str}))
 
             logger.info("[INDICES] %s  %s  %s  session_trades=%d", strategy_name, tf, ticker, total_session)
 

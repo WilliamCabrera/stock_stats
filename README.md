@@ -180,6 +180,34 @@ python -m scripts.plot_trade --ticker ABOS --date 2022-09-28
 
 ---
 
+### `scripts/test_strategy_local.py`
+
+Runs any registered iterative strategy on a single ticker/date using **local parquet files** (no API key required) and opens an interactive Plotly chart with entry/exit markers and SL/TP lines.
+
+```bash
+# Default: sma9_momentum_long_iterative, 5m
+python -m scripts.test_strategy_local --ticker CRVO --date 2026-06-16
+
+# Different timeframe
+python -m scripts.test_strategy_local --ticker CRVO --date 2026-06-16 --tf 15m
+
+# Different strategy
+python -m scripts.test_strategy_local --ticker AAOI --date 2024-11-08 --strategy backside_short_lower_low_fix_stop_iterative
+```
+
+CLI options:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--ticker` | required | Ticker symbol, e.g. `CRVO` |
+| `--date` | required | Trading date `YYYY-MM-DD` |
+| `--tf` | `5m` | Timeframe: `5m` or `15m` |
+| `--strategy` | `sma9_momentum_long_iterative` | Strategy function name from `small_caps.py` |
+
+Output: interactive HTML chart saved to `charts/` and opened in the browser. Trade summary printed to stdout.
+
+---
+
 ### `scripts/build_tqqq_dataset.py`
 Builds the TQQQ index dataset for the last 5 years in **5m, 10m, 1h and 1d** timeframes. Candles are fetched from Massive via `fetch_candles` in 1-month batches, indicators are computed, and cross-timeframe columns are joined before writing:
 
@@ -505,12 +533,42 @@ Notes: prices are **unadjusted** (6-decimal precision); `volume` is kept fractio
 
 Intraday strategies for small-cap gappers. Each function receives one day of 5m or 15m candles for one ticker and returns a `pd.DataFrame` of trades. Registered strategies:
 
-| Function | Signal |
-|---|---|
-| `backside_short_lower_low_fix_stop_iterative` | Red bar breaking the low of the prior green bar, above VWAP |
-| `gap_crap_iterative` | Short at 9:25 close if gapped ≥ 40 % over prior close |
-| `short_push_exhaustion_iterative` | Red bar with dominant topping tail, vol surge, above VWAP |
-| `push_rejection_iterative` | Red bar crossing VWAP downward with body > bottom tail |
+| Function | Type | Signal |
+|---|---|---|
+| `backside_short_lower_low_fix_stop_iterative` | Short | Red bar breaking the low of the prior green bar, above VWAP |
+| `gap_crap_iterative` | Short | Short at 9:25 close if gapped ≥ 40 % over prior close |
+| `short_push_exhaustion_iterative` | Short | Red bar with dominant topping tail, vol surge, above VWAP |
+| `push_rejection_iterative` | Short | Red bar crossing VWAP downward with body > bottom tail |
+| `sma9_momentum_long_iterative` | Long | Green bar with rising SMA9, volume ≥ 40 k, close 8–80 % above day low, no doji |
+
+#### `sma9_momentum_long_iterative`
+
+Momentum long triggered when a green candle shows SMA9 slope turning up, with the close sitting meaningfully above the day's running low (a proxy for intraday strength without being overextended).
+
+| Parameter | Default | Description |
+|---|---|---|
+| `min_dist_pct` | `0.08` | Minimum `(close − day_low) / day_low` (8 %) |
+| `max_dist_pct` | `0.80` | Maximum `(close − day_low) / day_low` (80 %) |
+| `min_volume` | `40_000` | Minimum bar volume |
+| `target_rr` | `3.0` | Risk/reward for TP — `entry + 3 × (entry − SL)` |
+| `slippage` | `0.001` | Fraction applied to open price on entry/exit |
+
+**Entry conditions (bar i):**
+
+1. Green candle: `close > open`
+2. Rising SMA9: `sma_9[i] > sma_9[i−1]`
+3. Volume ≥ `min_volume`
+4. `min_dist_pct < (close − cummin(low)) / cummin(low) < max_dist_pct`
+5. No doji: candle body ≥ 10 % of total range
+6. No time gap to previous bar
+
+**Trade mechanics:**
+
+- Entry: open of next bar × (1 + slippage)
+- SL: day's cumulative low at signal bar (fixed for the life of the trade)
+- TP: `entry + target_rr × (entry − SL)`
+- Forced close: last bar before 16:00 ET
+- If next bar opens below day low (negative risk), trade is skipped
 
 ### `strategies/iterative/orb_avg_range.py`
 

@@ -49,20 +49,23 @@ TRADE_COLUMNS: list[str] = [
     "exit_time",
     "strategy",
     "timeframe",
+    "is_open",
 ]
 
 
 def enforce_schema(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ensure df has exactly TRADE_COLUMNS in the right order.
-    Missing columns are filled with NaN so every strategy output is
-    compatible with the trades parquet files.
+    Missing columns are filled with NaN (False for is_open) so every strategy
+    output is compatible with the trades parquet files.
     """
     if df.empty:
         return pd.DataFrame(columns=TRADE_COLUMNS)
     for col in TRADE_COLUMNS:
         if col not in df.columns:
-            df[col] = np.nan
+            df[col] = False if col == "is_open" else np.nan
+    if "is_open" in df.columns:
+        df["is_open"] = df["is_open"].fillna(False).astype(bool)
     return df[TRADE_COLUMNS].reset_index(drop=True)
 
 

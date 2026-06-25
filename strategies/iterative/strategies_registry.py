@@ -7,10 +7,13 @@ from strategies.iterative.small_caps import (
     gap_crap_iterative,
     short_push_exhaustion_iterative,
     push_rejection_iterative,
+    sma9_momentum_long_iterative,
+    sma9_momentum_long_dynrr_iterative,
 )
-from strategies.iterative.trend_following import ema100_trend_follower_iterative
-from strategies.iterative.orb_avg_range import orb_avg_range_iterative
-from strategies.iterative.orb_first_candle import orb_first_candle_iterative
+from strategies.iterative.indices.trend_following import ema100_trend_follower_iterative
+from strategies.iterative.indices.orb_avg_range import orb_avg_range_iterative
+from strategies.iterative.indices.orb_first_candle import orb_first_candle_iterative
+from strategies.iterative.indices.sma_crossover_trail_iterative import sma_crossover_trail_iterative, _precompute as _sma_trail_precompute
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STRATEGY REGISTRY
@@ -81,6 +84,27 @@ STRATEGIES = [
         ],
     },
     {
+        "strategy_name": "sma9_momentum_long_iterative",
+        "strategy_func": sma9_momentum_long_iterative,
+        "dataset": "small_caps",
+        "params": [
+            {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 0.80, "min_volume": 40_000, "target_rr": 10.0, "max_hold_hours": 1, "out_put_name": "sma9_momentum_long_iterative_0.08_0.80_3_1h"},
+            {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 1.80, "min_volume": 40_000, "target_rr": 1.0, "max_hold_hours": 1, "out_put_name": "sma9_momentum_long_iterative_0.08_0.80_1.0"},
+            {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 1.80, "min_volume": 40_000, "target_rr": 2.0, "max_hold_hours": 1, "out_put_name": "sma9_momentum_long_iterative_0.08_0.80_2.0"},
+            {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 1.80, "min_volume": 40_000, "target_rr": 3.0, "max_hold_hours": 1, "out_put_name": "sma9_momentum_long_iterative_0.08_0.80_3.0"},
+        ],
+    },
+    {
+        "strategy_name": "sma9_momentum_long_dynrr_iterative",
+        "strategy_func": sma9_momentum_long_dynrr_iterative,
+        "dataset": "small_caps",
+        "params": [
+            {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 0.80, "min_volume": 40_000, "max_hold_hours": 1.0, "out_put_name": "sma9_momentum_long_dynrr_iterative_0.08_0.80_1h"},
+           # {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 0.80, "min_volume": 40_000, "max_hold_hours": 2.0, "out_put_name": "sma9_momentum_long_dynrr_iterative_0.08_0.80_2h"},
+           # {"slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0, "min_dist_pct": 0.08, "max_dist_pct": 0.80, "min_volume": 40_000, "max_hold_hours": 3.0, "out_put_name": "sma9_momentum_long_dynrr_iterative_0.08_0.80_3h"},
+        ],
+    },
+    {
         "strategy_name": "orb_first_candle_iterative",
         "strategy_func": orb_first_candle_iterative,
         "dataset": "indices",
@@ -100,6 +124,23 @@ STRATEGIES = [
         "timeframes": ["10m"],
         "params": [
             {"slippage": 0.001, "gap_pct": 0.40, "stop_pct": 0.50, "tp_pct": 0.20, "out_put_name": "orb_avg_range_iterative"},
+        ],
+    },
+    {
+        "strategy_name": "sma_crossover_trail_iterative",
+        "strategy_func": sma_crossover_trail_iterative,
+        "precompute_fn": _sma_trail_precompute,
+        "multi_day": True,
+        "dataset": "indices",
+        "data_root": "backtest_dataset/INDICES",
+        "tickers": ["QQQ", "TQQQ"],
+        "timeframes": ["1h"],
+        "params": [
+            {
+                "slippage": 0.001, "gap_pct": 0, "stop_pct": 0, "tp_pct": 0,
+                "sma_window": 50, "atr_period": 14, "factor": 2.0, "max_hold_days": 1000,
+                "out_put_name": "sma_crossover_trail_sma50_atr14_f2.0",
+            },
         ],
     },
     # {

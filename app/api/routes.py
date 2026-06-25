@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, HTTPException, Query
 from typing import Literal
 from pathlib import Path
@@ -117,6 +118,20 @@ async def list_strategies():
                             strategy_dir / f"{strategy_dir.name}_full_{tf_dir.name}_trades.parquet",
                         )
 
+    # Scan UP-TO-DATE iterative strategies
+    uptodate_root = Path(os.path.abspath(".")) / "strategies" / "iterative" / "UP-TO-DATE"
+    if uptodate_root.is_dir():
+        for tf_dir in sorted(uptodate_root.iterdir()):
+            if not tf_dir.is_dir():
+                continue
+            for strategy_dir in sorted(tf_dir.iterdir()):
+                if strategy_dir.is_dir():
+                    _add_full(strategy_dir.name, tf_dir.name)
+                    _read_variants(
+                        strategy_dir.name,
+                        strategy_dir / f"{strategy_dir.name}_{tf_dir.name}.parquet",
+                    )
+
     # Scan walkforward/<timeframe>/fold_<n>/trades/
     wf_root = base / "walkforward"
     if wf_root.is_dir():
@@ -162,10 +177,18 @@ _TRADE_COLUMNS = [
 
 def _parquet_path(strategy: str, timeframe: str) -> Path:
     settings = get_settings()
-    return (
+    primary = (
         Path(settings.dataset_path)
         / "full" / timeframe / "trades" / strategy
         / f"{strategy}_full_{timeframe}_trades.parquet"
+    )
+    if primary.exists():
+        return primary
+    # Fallback: UP-TO-DATE iterative parquets
+    return (
+        Path(os.path.abspath("."))
+        / "strategies" / "iterative" / "UP-TO-DATE"
+        / timeframe / strategy / f"{strategy}_{timeframe}.parquet"
     )
 
 
@@ -191,7 +214,9 @@ def _load_trades(strategy: str, timeframe: str) -> list[dict]:
         df = _load_df(strategy, timeframe).copy()
         for col in ("entry_time", "exit_time"):
             if col in df.columns:
-                df[col] = df[col].dt.strftime("%Y-%m-%dT%H:%M:%S")
+                df[col] = df[col].apply(
+                    lambda x: x.strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(x) else None
+                )
         _trades_cache[key] = df[_TRADE_COLUMNS].to_dict(orient="records")
     return _trades_cache[key]
 
